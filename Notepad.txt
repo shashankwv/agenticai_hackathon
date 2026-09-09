@@ -1,3 +1,5 @@
+--Successfully execution of first Agent Trial
+
 (sdlc-multiagent-automation) @shashankwv ➜ /workspaces/codespaces-blank/sdlc-multiagent-automation (main) $ python -c "
 from core.state import ProjectState
 from agents.agent_requirements import run_requirements_agent

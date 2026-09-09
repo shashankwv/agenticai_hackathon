@@ -21,9 +21,21 @@ dependencies = [
     "uvicorn>=0.52.4",
 ]
 
-[project.scripts]
-sdlc-multiagent-automation = "sdlc_multiagent_automation:main"
+# [project.scripts]
+# sdlc-multiagent-automation = "sdlc_multiagent_automation:main"
 
-[build-system]
-requires = ["uv_build>=0.12.11,<0.13.0"]
-build-backend = "uv_build"
+# [build-system]
+# requires = ["uv_build>=0.12.11,<0.13.0"]
+# build-backend = "uv_build"
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
