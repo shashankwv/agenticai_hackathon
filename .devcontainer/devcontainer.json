@@ -1,0 +1,17 @@
+{
+  "name": "SDLC Multi-Agent Codespace",
+  "image": "mcr.microsoft.com/devcontainers/python:3.14.2",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:1": {}
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "rangav.vscode-thunder-client"
+      ]
+    }
+  },
+  "postCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh && $HOME/.cargo/bin/uv venv .venv && source .venv/bin/activate && $HOME/.cargo/bin/uv pip install -r requirements.txt",
+  "forwardPorts": [8000, 8501, 5432]
+}
