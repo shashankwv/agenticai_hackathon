@@ -1,0 +1,17 @@
+(sdlc-multiagent-automation) @shashankwv ➜ /workspaces/codespaces-blank/sdlc-multiagent-automation (main) $ python -c "
+from core.state import ProjectState
+from agents.agent_requirements import run_requirements_agent
+
+# Initialize state with a test requirement
+initial_state = ProjectState(
+    raw_requirement='Add aadhaar_no as VARCHAR(12) required field and alternate_phone as VARCHAR(20)'
+": {attr.is_required}')ttr.name} | Type: {attr.data_type} | Require
+Direct use of automatic function calling (AFC) in Models.generate_content is not recommended. Instead, we recommend to use AFC in Chat.send_message. Similarly, direct use of AFC in Models.generate_content_stream is not recommended. Instead, we recommend to use AFC in Chat.send_message_stream.
+--- AGENT 1 OUTPUT ---
+Entity: Party
+Total Attributes: 13
+
+Newly Added Fields:
+ - Name: aadhaar_no | Type: VARCHAR(12) | Required: True
+ - Name: alternate_phone | Type: VARCHAR(20) | Required: False
+(sdlc-multiagent-automation) @shashankwv ➜ /workspaces/codespaces-blank/sdlc-multiagent-automation (main) $ 
