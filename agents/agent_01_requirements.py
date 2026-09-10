@@ -1,27 +1,22 @@
+# agents/agent_01_requirements.py
 import json
 from pathlib import Path
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 from core.state import EntitySchema, ProjectState
+from core.llm_factory import get_llm
 
-# Resolve project root dynamically (agents/ -> root)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def run_requirements_agent(state: ProjectState) -> ProjectState:
-    # 1. Load baseline seed schema using absolute path relative to project root
     if state.current_schema is None:
         seed_path = BASE_DIR / "templates" / "seed_schema.json"
         with open(seed_path, "r") as f:
             seed_data = json.load(f)
             state.current_schema = EntitySchema(**seed_data)
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0,
-    )
-
-    structured_llm = llm.with_structured_output(EntitySchema)
+    # Get structured LLM with schema fallbacks pre-bound
+    structured_llm = get_llm(temperature=0, schema=None)
 
     prompt = ChatPromptTemplate.from_messages(
         [

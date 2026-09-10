@@ -8,6 +8,7 @@ load_dotenv()
 from core.state import ProjectState
 from agents.agent_01_requirements import run_requirements_agent
 from agents.agent_02_ui import run_ui_agent
+from agents.agent_03_etl import run_etl_agent
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -59,3 +60,53 @@ def test_ui_agent_generation():
     assert final_state.ui_code != ""
     assert "import streamlit" in final_state.ui_code
     assert "aadhaar_no" in final_state.ui_code
+
+    
+
+# ============================================================================
+# AGENT 3 TESTS: ETL Engine (Data Pipeline Generation)
+# ============================================================================
+def test_etl_agent_generation():
+    # 1. Setup state and populate schema via Agent 01
+    initial_state = ProjectState(
+        raw_requirement="Add aadhaar_no as VARCHAR(12) required field"
+    )
+    state_with_schema = run_requirements_agent(initial_state)
+
+    # 2. Run Agent 03
+    final_state = run_etl_agent(state_with_schema)
+
+    # 3. Assertions for Agent 03
+    assert final_state.etl_code != ""
+    assert "def transform_data" in final_state.etl_code
+    assert "aadhaar_no" in final_state.etl_code
+
+
+# ============================================================================
+# AGENT 4 TESTS: MDM Engine (SQL DDL & Governance Generation)
+# ============================================================================
+def test_mdm_agent_generation():
+    # 1. Setup state and populate schema via Agent 01
+    initial_state = ProjectState(
+        raw_requirement="Add aadhaar_no as VARCHAR(12) required field"
+    )
+    state_with_schema = run_requirements_agent(initial_state)
+
+    # 2. Run Agent 04
+    final_state = run_mdm_agent(state_with_schema)
+
+    # 3. Assertions for Agent 04
+    assert final_state.mdm_ddl != ""
+    assert "CREATE TABLE" in final_state.mdm_ddl
+    assert "ON CONFLICT" in final_state.mdm_ddl
+
+
+# ============================================================================
+# DOCUMENTATION GENERATION TESTS
+# ============================================================================
+def test_docs_generation():
+    """Ensures architecture diagram auto-generation runs without errors."""
+    try:
+        update_arch_docs()
+    except Exception as e:
+        pytest.fail(f"Architecture documentation script failed: {e}")

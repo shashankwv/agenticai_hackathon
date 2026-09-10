@@ -2,6 +2,7 @@
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from core.state import ProjectState
+from core.llm_factory import get_llm
 
 
 def run_ui_agent(state: ProjectState) -> ProjectState:
@@ -13,10 +14,12 @@ def run_ui_agent(state: ProjectState) -> ProjectState:
     if not state.current_schema:
         raise ValueError("Cannot generate UI: ProjectState.current_schema is empty.")
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        temperature=0.0,
-    )
+# Replace old llm definition with factory call
+    llm = get_llm(temperature=0)
+    # llm = ChatGoogleGenerativeAI(
+    #     model="gemini-2.5-flash",
+    #     temperature=0.0,
+    # )
 
     prompt = ChatPromptTemplate.from_messages(
         [
