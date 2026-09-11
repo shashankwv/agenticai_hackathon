@@ -27,15 +27,31 @@ def get_llm(temperature: float = 0.0, schema=None):
             )
         )
 
-    # 2. Immediate Non-Google Fallback (Bypasses Google API key quota limits)
+
     if groq_key:
         raw_models.append(
             ChatGroq(
-                model="llama-3.3-70b-versatile",
+                model="qwen/qwen3.8-27b",
                 temperature=temperature,
+                # max_tokens=600,  # Caps expected output below 1000 OTPM
+                # max_retries=0,   # Instantly triggers fallbacks if rate limited
                 groq_api_key=groq_key,
             )
         )
+
+
+
+    # # 2. Immediate Non-Google Fallback (Bypasses Google API key quota limits)
+    # if groq_key:
+    #     raw_models.append(
+    #         ChatGroq(
+    #             model="llama-3.3-70b-specdec",  # or "llama3-70b-8192"
+    #             temperature=temperature,
+    #             max_tokens=500,  # Prevents output token rate limit errors on Groq
+    #             groq_api_key=groq_key,
+    #         )
+    #     )
+
 
     # 3. Secondary Non-Google Fallback
     if openai_key:
@@ -90,3 +106,20 @@ def get_llm(temperature: float = 0.0, schema=None):
             fallbacks, exceptions_to_handle=exceptions_to_catch
         )
     return primary
+    # if fallbacks:
+    #     llm = primary.with_fallbacks(
+    #         fallbacks,
+    #         exceptions_to_handle=(Exception,)
+    #     )
+
+    #     print("\n=== LLM DEBUG ===")
+    #     print("Primary:", type(primary).__name__)
+
+    #     for i, fb in enumerate(fallbacks, start=1):
+    #         print(f"Fallback {i}:", type(fb).__name__)
+
+    #     print("Returned Type:", type(llm).__name__)
+    #     print("=================\n")
+
+    #     return llm
+    # return primary

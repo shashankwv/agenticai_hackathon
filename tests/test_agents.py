@@ -9,6 +9,8 @@ from core.state import ProjectState
 from agents.agent_01_requirements import run_requirements_agent
 from agents.agent_02_ui import run_ui_agent
 from agents.agent_03_etl import run_etl_agent
+from agents.agent_04_mdm import run_mdm_agent
+from scripts.generate_docs import main as update_arch_docs
 
 warnings.filterwarnings("ignore", category=UserWarning)
 

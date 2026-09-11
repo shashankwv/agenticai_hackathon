@@ -16,7 +16,7 @@ def run_requirements_agent(state: ProjectState) -> ProjectState:
             state.current_schema = EntitySchema(**seed_data)
 
     # Get structured LLM with schema fallbacks pre-bound
-    structured_llm = get_llm(temperature=0, schema=None)
+    structured_llm = get_llm(temperature=0, schema=EntitySchema)
 
     prompt = ChatPromptTemplate.from_messages(
         [
