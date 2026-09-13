@@ -1,0 +1,104 @@
+{
+  "raw_requirement": "Add aadhaar_no as VARCHAR(12) required field and alternate_phone as VARCHAR(20)",
+  "current_schema": {
+    "domain": "Banking_Party_Master",
+    "entity_name": "Party",
+    "attributes": [
+      {
+        "name": "id_prim",
+        "data_type": "VARCHAR(50)",
+        "is_required": true,
+        "is_primary_key": true,
+        "description": "Primary Party Identifier"
+      },
+      {
+        "name": "plss",
+        "data_type": "VARCHAR(20)",
+        "is_required": true,
+        "is_primary_key": false,
+        "description": "Prospect or Active Status"
+      },
+      {
+        "name": "first_name",
+        "data_type": "VARCHAR(100)",
+        "is_required": true,
+        "is_primary_key": false,
+        "description": "First Name"
+      },
+      {
+        "name": "last_name",
+        "data_type": "VARCHAR(100)",
+        "is_required": true,
+        "is_primary_key": false,
+        "description": "Last Name"
+      },
+      {
+        "name": "tax_id_type",
+        "data_type": "VARCHAR(20)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Tax Identification Type"
+      },
+      {
+        "name": "tax_id",
+        "data_type": "VARCHAR(50)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Tax Identification Number"
+      },
+      {
+        "name": "dob",
+        "data_type": "DATE",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Date of Birth"
+      },
+      {
+        "name": "legal_addr",
+        "data_type": "VARCHAR(255)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Legal Address"
+      },
+      {
+        "name": "prim_addr",
+        "data_type": "VARCHAR(255)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Primary Address"
+      },
+      {
+        "name": "phone_number",
+        "data_type": "VARCHAR(20)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Phone Number"
+      },
+      {
+        "name": "email_id",
+        "data_type": "VARCHAR(100)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Email Address"
+      },
+      {
+        "name": "aadhaar_no",
+        "data_type": "VARCHAR(12)",
+        "is_required": true,
+        "is_primary_key": false,
+        "description": "Aadhaar Number"
+      },
+      {
+        "name": "alternate_phone",
+        "data_type": "VARCHAR(20)",
+        "is_required": false,
+        "is_primary_key": false,
+        "description": "Alternate Phone Number"
+      }
+    ]
+  },
+  "ui_code": "{'type': 'text', 'text': 'import datetime\\nimport re\\nimport streamlit as st\\n\\nst.set_page_config(\\n    page_title=\"Banking Party Master - Party Entry\",\\n    page_icon=\"🏦\",\\n    layout=\"wide\"\\n)\\n\\nst.title(\"🏦 Banking Party Master\")\\nst.subheader(\"Party Record Entry Form\")\\nst.caption(\"Fields marked with an asterisk (*) are required.\")\\n\\nwith st.form(key=\"party_form\", clear_on_submit=False):\\n    st.markdown(\"### Identification Details\")\\n    col1, col2 = st.columns(2)\\n\\n    with col1:\\n        id_prim = st.text_input(\\n            \"Primary Party Identifier *\",\\n            max_chars=50,\\n            help=\"Unique primary identifier for the party.\"\\n        )\\n        first_name = st.text_input(\\n            \"First Name *\",\\n            max_chars=100,\\n            help=\"First name of the party.\"\\n        )\\n        plss = st.selectbox(\\n            \"Prospect or Active Status *\",\\n            options=[\"\", \"Active\", \"Prospect\", \"Suspended\", \"Terminated\"],\\n            help=\"Current status of the party.\"\\n        )\\n\\n    with col2:\\n        aadhaar_no = st.text_input(\\n            \"Aadhaar Number *\",\\n            max_chars=12,\\n            help=\"12-digit Aadhaar Number.\"\\n        )\\n        last_name = st.text_input(\\n            \"Last Name *\",\\n            max_chars=100,\\n            help=\"Last name of the party.\"\\n        )\\n\\n    st.markdown(\"---\")\\n    st.markdown(\"### Tax & Personal Information\")\\n    col3, col4 = st.columns(2)\\n\\n    with col3:\\n        tax_id_type = st.selectbox(\\n            \"Tax Identification Type\",\\n            options=[\"\", \"PAN\", \"SSN\", \"TIN\", \"EIN\"],\\n            help=\"Type of Tax Identification.\"\\n        )\\n        dob = st.date_input(\\n            \"Date of Birth\",\\n            value=None,\\n            min_value=datetime.date(1900, 1, 1),\\n            max_value=datetime.date.today(),\\n            help=\"Date of Birth of the party.\"\\n        )\\n\\n    with col4:\\n        tax_id = st.text_input(\\n            \"Tax Identification Number\",\\n            max_chars=50,\\n            help=\"Tax Identification Number corresponding to type.\"\\n        )\\n\\n    st.markdown(\"---\")\\n    st.markdown(\"### Contact Information\")\\n    col5, col6 = st.columns(2)\\n\\n    with col5:\\n        phone_number = st.text_input(\\n            \"Phone Number\",\\n            max_chars=20,\\n            help=\"Primary phone number.\"\\n        )\\n        email_id = st.text_input(\\n            \"Email Address\",\\n            max_chars=100,\\n            help=\"Primary email address.\"\\n        )\\n\\n    with col6:\\n        alternate_phone = st.text_input(\\n            \"Alternate Phone Number\",\\n            max_chars=20,\\n            help=\"Secondary phone number.\"\\n        )\\n\\n    st.markdown(\"---\")\\n    st.markdown(\"### Address Details\")\\n    col7, col8 = st.columns(2)\\n\\n    with col7:\\n        legal_addr = st.text_area(\\n            \"Legal Address\",\\n            max_chars=255,\\n            height=100,\\n            help=\"Official legal address.\"\\n        )\\n\\n    with col8:\\n        prim_addr = st.text_area(\\n            \"Primary Address\",\\n            max_chars=255,\\n            height=100,\\n            help=\"Primary correspondence address.\"\\n        )\\n\\n    submitted = st.form_submit_button(\"Submit Party Record\", use_container_width=True)\\n\\nif submitted:\\n    errors = []\\n\\n    # Mandatory field validation\\n    if not id_prim.strip():\\n        errors.append(\"Primary Party Identifier (id_prim) is required.\")\\n    if not plss.strip():\\n        errors.append(\"Prospect or Active Status (plss) is required.\")\\n    if not first_name.strip():\\n        errors.append(\"First Name is required.\")\\n    if not last_name.strip():\\n        errors.append(\"Last Name is required.\")\\n    \\n    # Aadhaar validation\\n    if not aadhaar_no.strip():\\n        errors.append(\"Aadhaar Number is required.\")\\n    elif not (aadhaar_no.isdigit() and len(aadhaar_no) == 12):\\n        errors.append(\"Aadhaar Number must be exactly 12 numeric digits.\")\\n\\n    # Optional Email validation\\n    if email_id.strip():\\n        email_regex = r\"^[\\\\w\\\\.-]+@[\\\\w\\\\.-]+\\\\.\\\\w+$\"\\n        if not re.match(email_regex, email_id.strip()):\\n            errors.append(\"Please provide a valid email address.\")\\n\\n    # Display errors or submit success\\n    if errors:\\n        for err in errors:\\n            st.error(err)\\n    else:\\n        st.success(\"Party record validated and submitted successfully!\")\\n        \\n        record_data = {\\n            \"id_prim\": id_prim.strip(),\\n            \"plss\": plss,\\n            \"first_name\": first_name.strip(),\\n            \"last_name\": last_name.strip(),\\n            \"tax_id_type\": tax_id_type if tax_id_type else None,\\n            \"tax_id\": tax_id.strip() if tax_id.strip() else None,\\n            \"dob\": str(dob) if dob else None,\\n            \"legal_addr\": legal_addr.strip() if legal_addr.strip() else None,\\n            \"prim_addr\": prim_addr.strip() if prim_addr.strip() else None,\\n            \"phone_number\": phone_number.strip() if phone_number.strip() else None,\\n            \"email_id\": email_id.strip() if email_id.strip() else None,\\n            \"aadhaar_no\": aadhaar_no.strip(),\\n            \"alternate_phone\": alternate_phone.strip() if alternate_phone.strip() else None,\\n        }\\n        \\n        st.subheader(\"Submitted Record Summary\")\\n        st.json(record_data)', 'extras': {'signature': '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'}}",
+  "etl_code": "",
+  "mdm_ddl": "",
+  "errors": []
+}

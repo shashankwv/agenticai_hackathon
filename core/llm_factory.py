@@ -21,7 +21,7 @@ def get_llm(temperature: float = 0.0, schema=None):
     if primary_key:
         raw_models.append(
             ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-3.6-flash",
                 temperature=temperature,
                 google_api_key=primary_key,
             )
@@ -109,7 +109,7 @@ def get_llm(temperature: float = 0.0, schema=None):
     # if fallbacks:
     #     llm = primary.with_fallbacks(
     #         fallbacks,
-    #         exceptions_to_handle=(Exception,)
+    #         exceptions_to_handle=(sException,)
     #     )
 
     #     print("\n=== LLM DEBUG ===")

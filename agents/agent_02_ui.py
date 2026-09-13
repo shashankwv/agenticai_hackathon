@@ -45,13 +45,23 @@ def run_ui_agent(state: ProjectState) -> ProjectState:
         {"schema_json": state.current_schema.model_dump_json(indent=2)}
     )
 
-    ui_script = response.content.strip()
+    raw = response.content
+    if isinstance(raw, list):
+        raw = "".join(str(x) for x in raw)
+    elif isinstance(raw, dict):
+        raw = raw.get("content") or raw.get("text") or raw.get("output") or str(raw)
+    elif not isinstance(raw, str):
+        raw = str(raw)
+
+    ui_script = raw.strip()
     if ui_script.startswith("```python"):
-        ui_script = ui_script[9:]
+        ui_script = ui_script[len("```python"):]
     if ui_script.startswith("```"):
-        ui_script = ui_script[3:]
+        ui_script = ui_script[len("```"):]
     if ui_script.endswith("```"):
-        ui_script = ui_script[:-3]
+        ui_script = ui_script[:-len("```")]
+
+    state.ui_code = ui_script.strip()
 
     # Assign directly to state.ui_code
     state.ui_code = ui_script.strip()

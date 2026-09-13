@@ -22,3 +22,6 @@ Newly Added Fields:
 
 Display on hover
 python -m pytest tests/ -v -s
+
+unset GITHUB_TOKEN
+gh auth login

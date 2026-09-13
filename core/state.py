@@ -14,7 +14,15 @@ class EntitySchema(BaseModel):
     attributes: List[AttributeSpec]
 
 class ProjectState(BaseModel):
-    raw_requirement: str = ""
+    raw_confluence_doc: str = ""
+    jira_ui_task: str = ""
+    jira_etl_task: str = ""
+    jira_mdm_task: str = ""
+    # Add fields to track created ticket keys from Step 3
+    jira_ui_issue_key: Optional[str] = None
+    jira_etl_issue_key: Optional[str] = None
+    jira_mdm_issue_key: Optional[str] = None
+    
     current_schema: Optional[EntitySchema] = None
     ui_code: str = ""
     etl_code: str = ""
