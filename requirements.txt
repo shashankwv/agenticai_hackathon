@@ -13,3 +13,8 @@ langchain-google-genai
 langchain-groq 
 langchain-openai
 langchain
+duckdb
+polars
+rill
+psycopg2-binary
+streamlit

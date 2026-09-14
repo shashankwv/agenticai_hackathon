@@ -1,260 +1,519 @@
+import json
+import os
+import socket
+import subprocess
+import time
+import urllib.request
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+import psycopg2
 import streamlit as st
-from datetime import date
-import re
 
-# Entity Schema provided by the user
-entity_schema = {
-  "domain": "Banking_Party_Master",
-  "entity_name": "Party",
-  "attributes": [
-    {
-      "name": "id_prim",
-      "data_type": "VARCHAR(50)",
-      "is_required": True,
-      "is_primary_key": True,
-      "description": "Primary Party Identifier"
-    },
-    {
-      "name": "plss",
-      "data_type": "VARCHAR(20)",
-      "is_required": True,
-      "is_primary_key": False,
-      "description": "Prospect or Active Status"
-    },
-    {
-      "name": "first_name",
-      "data_type": "VARCHAR(100)",
-      "is_required": True,
-      "is_primary_key": False,
-      "description": "First Name"
-    },
-    {
-      "name": "last_name",
-      "data_type": "VARCHAR(100)",
-      "is_required": True,
-      "is_primary_key": False,
-      "description": "Last Name"
-    },
-    {
-      "name": "tax_id_type",
-      "data_type": "VARCHAR(20)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Tax Identification Type"
-    },
-    {
-      "name": "tax_id",
-      "data_type": "VARCHAR(50)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Tax Identification Number"
-    },
-    {
-      "name": "dob",
-      "data_type": "DATE",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Date of Birth"
-    },
-    {
-      "name": "legal_addr",
-      "data_type": "VARCHAR(255)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Legal Address"
-    },
-    {
-      "name": "prim_addr",
-      "data_type": "VARCHAR(255)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Primary Address"
-    },
-    {
-      "name": "phone_number",
-      "data_type": "VARCHAR(20)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Phone Number"
-    },
-    {
-      "name": "email_id",
-      "data_type": "VARCHAR(100)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Email Address"
-    },
-    {
-      "name": "aadhaar_no",
-      "data_type": "VARCHAR(12)",
-      "is_required": True,
-      "is_primary_key": False,
-      "description": "Aadhaar Number"
-    },
-    {
-      "name": "alternate_phone",
-      "data_type": "VARCHAR(20)",
-      "is_required": False,
-      "is_primary_key": False,
-      "description": "Alternate Phone Number"
-    }
-  ]
-}
+# Import State and Agents
+from agents.agent_01_requirements.step_04_agent import run_requirements_agent
+from agents.agent_02_ui_code_generation.step_03_agent import (
+    run_ui_code_generation_agent,
+)
+from agents.agent_03_etl.step_04_agent import run_etl_agent
+from agents.agent_04_mdm.step_03_agent import run_mdm_agent_autonomous
+from core.state import ProjectState
 
-st.set_page_config(layout="centered")
-st.title(f"{entity_schema['entity_name']} Information Form")
-st.subheader(f"Domain: {entity_schema['domain']}")
+from agents.agent_04_mdm.step_05_postgres_executor import (
+    ensure_postgres_running,
+)
 
-# Initialize session state for form data and errors
-if 'form_data' not in st.session_state:
-    st.session_state.form_data = {}
-if 'form_errors' not in st.session_state:
-    st.session_state.form_errors = {}
+# --- ABSOLUTE PATH RESOLUTION ---
+PROJECT_ROOT = Path(__file__).resolve().parent
+CHECKPOINT_PATH = PROJECT_ROOT / "state_checkpoint_1.json"
+FRONTEND_UI_DIR = PROJECT_ROOT / "frontend-ui"
+FRONTEND_APP_TSX = FRONTEND_UI_DIR / "src" / "App.tsx"
 
-def get_varchar_length(data_type_str):
-    """Extracts the length from a VARCHAR(X) string."""
-    match = re.search(r'VARCHAR\((\d+)\)', data_type_str)
-    return int(match.group(1)) if match else None
+REACT_PORT_START = 5173
+REACT_PORT_END = 5199
 
-def validate_form(data):
-    """Performs validation on the form data based on the schema."""
-    errors = {}
 
-    for attr in entity_schema['attributes']:
-        name = attr['name']
-        label = attr['description']
-        is_required = attr['is_required']
-        data_type = attr['data_type']
-        value = data.get(name)
+def write_ui_code_to_frontend_app(ui_code: str) -> None:
+    """Mirror the generated TSX code into the Vite frontend workspace App.tsx."""
+    FRONTEND_APP_TSX.write_text(ui_code, encoding="utf-8")
 
-        # 1. Required field validation
-        if is_required and (value is None or (isinstance(value, str) and not value.strip())):
-            errors[name] = f"{label} is required."
-            continue # Skip further validation for this field if it's empty and required
 
-        # If not required and empty, no further validation needed for this field
-        if not is_required and (value is None or (isinstance(value, str) and not value.strip())):
+def format_codespace_or_local_url(port: int) -> str:
+    """Constructs the exact public URL for GitHub Codespaces or localhost."""
+    codespace_name = os.getenv("CODESPACE_NAME")
+    github_domain = os.getenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev")
+    
+    if codespace_name:
+        # Automatically make the port public inside Codespaces ifgh CLI is available
+        try:
+            subprocess.run(["gh", "codespace", "ports", "visibility", f"{port}:public"], 
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return f"https://{codespace_name}-{port}.{github_domain}/"
+    return f"http://localhost:{port}/"
+
+
+def get_actively_running_vite_port() -> int | None:
+    """Scans local ports to find which port is actually listening and returning Vite assets."""
+    for port in range(REACT_PORT_START, REACT_PORT_END + 1):
+        try:
+            url = f"http://127.0.0.1:{port}"
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                with urllib.request.urlopen(url, timeout=0.5) as response:
+                    body = response.read(2048).decode("utf-8", errors="ignore")
+                    if response.status < 500 and ("@vite/client" in body or "root" in body.lower() or "<div" in body.lower()):
+                        return port
+        except Exception:
             continue
+    return None
 
-        # 2. Data type specific validation
-        if 'VARCHAR' in data_type:
-            max_len = get_varchar_length(data_type)
-            if max_len and len(str(value)) > max_len:
-                errors[name] = f"{label} must be at most {max_len} characters long."
 
-            if name == 'plss':
-                if value not in ["Prospect", "Active"]:
-                    errors[name] = f"{label} must be 'Prospect' or 'Active'."
-            elif name in ['phone_number', 'alternate_phone']:
-                # Remove spaces and hyphens for validation, but keep original for display
-                cleaned_value = str(value).replace(" ", "").replace("-", "")
-                if not re.fullmatch(r'^\d{10,20}$', cleaned_value):
-                    errors[name] = f"{label} must be a valid phone number (10-20 digits)."
-            elif name == 'email_id':
-                if not re.fullmatch(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', value):
-                    errors[name] = f"{label} must be a valid email address."
-            elif name == 'aadhaar_no':
-                if not re.fullmatch(r'^\d{12}$', value):
-                    errors[name] = f"{label} must be a 12-digit number."
+def ensure_react_vite_server() -> str:
+    """Checks for a live Vite server or launches a fresh process, returning the verified URL."""
+    active_port = get_actively_running_vite_port()
+    if active_port is not None:
+        return format_codespace_or_local_url(active_port)
 
-        elif data_type == 'DATE':
-            # st.date_input returns a datetime.date object or None
-            if value and not isinstance(value, date):
-                errors[name] = f"{label} must be a valid date."
-            elif value and value > date.today():
-                errors[name] = f"{label} cannot be in the future."
+    # If no Vite server is responding, start one on port 5173
+    chosen_port = REACT_PORT_START
 
-    return errors
+    try:
+        subprocess.Popen(
+            f"npm run dev -- --host 0.0.0.0 --port {chosen_port}",
+            cwd=str(FRONTEND_UI_DIR),
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(3.0)
+    except Exception as exc:
+        st.warning(f"Unable to launch Vite dev server automatically: {exc}")
 
-with st.form(key='party_form'):
-    cols = st.columns(2) # Use columns for better layout
+    # Re-verify which port Vite actually bound to after launch
+    actual_port = get_actively_running_vite_port() or chosen_port
+    return format_codespace_or_local_url(actual_port)
 
-    form_values = {}
 
-    for i, attr in enumerate(entity_schema['attributes']):
-        name = attr['name']
-        label = attr['description'] + (" *" if attr['is_required'] else "")
-        data_type = attr['data_type']
-        is_required = attr['is_required']
-        max_len = get_varchar_length(data_type)
+def launch_generated_ui_sandbox(ui_code: str) -> str:
+    """Writes UI code and returns the verified Vite sandbox URL."""
+    write_ui_code_to_frontend_app(ui_code)
+    return ensure_react_vite_server()
 
-        with cols[i % 2]:
-            # Display error message if exists, above the input field
-            if st.session_state.form_errors.get(name):
-                st.error(st.session_state.form_errors[name])
 
-            if name == 'plss':
-                options = ["Prospect", "Active"]
-                default_index = 0
-                current_value = st.session_state.form_data.get(name)
+# --- HELPER FUNCTIONS FOR STATE PERSISTENCE ---
+def load_checkpoint(filepath: Path = CHECKPOINT_PATH) -> ProjectState:
+    """Loads ProjectState from disk if the file exists."""
+    if filepath.exists():
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return ProjectState(**data)
+    return ProjectState()
 
-                if not is_required:
-                    options.insert(0, "") # Add empty option if not required
-                    if current_value == "":
-                        default_index = 0
-                    elif current_value in options:
-                        default_index = options.index(current_value)
-                    else:
-                        default_index = 0 # Default to empty if not required
-                else: # is_required
-                    if current_value in options:
-                        default_index = options.index(current_value)
-                    else:
-                        default_index = 0 # Default to first option if required
 
-                form_values[name] = st.selectbox(
-                    label=label,
-                    options=options,
-                    index=default_index,
-                    key=f"input_{name}",
-                    help=attr['description']
+def save_checkpoint(
+    state: ProjectState, filepath: Path = CHECKPOINT_PATH
+) -> None:
+    """Saves current ProjectState to disk as a JSON checkpoint."""
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(state.model_dump_json(indent=2))
+    st.toast(f"💾 Checkpoint saved to {filepath.name}!")
+
+
+# --- STREAMLIT CONFIGURATION & STYLING ---
+st.set_page_config(
+    page_title="Autonomous SDLC Agentic Dashboard", page_icon="🤖", layout="wide"
+)
+
+st.markdown(
+    """
+<style>
+    /* App Base Background */
+    .stApp {
+        background-color: #0E1117;
+        color: #E0E6ED;
+    }
+    
+    /* Headers */
+    .main-header {
+        font-size: 2.2rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #4F46E5, #06B6D4);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.2rem;
+    }
+    .sub-header {
+        font-size: 1rem;
+        color: #94A3B8;
+        margin-bottom: 1.5rem;
+    }
+    
+    /* Input and Textarea Backgrounds & High-Contrast Readable Text */
+    div[data-baseweb="textarea"],
+    div[data-baseweb="input"],
+    div[data-baseweb="base-input"] {
+        background-color: #F1F5F9 !important;
+        border-radius: 6px !important;
+    }
+
+    textarea, input,
+    div[data-baseweb="textarea"] textarea, 
+    div[data-baseweb="input"] input {
+        color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
+        background-color: #F1F5F9 !important;
+        font-weight: 600 !important;
+        font-family: monospace !important;
+    }
+
+    /* Sidebar Input Text Fields */
+    section[data-testid="stSidebar"] input,
+    section[data-testid="stSidebar"] textarea {
+        color: #0F172A !important;
+        -webkit-text-fill-color: #0F172A !important;
+        background-color: #F1F5F9 !important;
+    }
+
+    /* Expander Container styling */
+    div[data-testid="stExpander"] {
+        background-color: #1E293B !important;
+        border: 1px solid #334155 !important;
+        border-radius: 8px !important;
+    }
+    div[data-testid="stExpander"] details summary span,
+    div[data-testid="stExpander"] details summary p {
+        color: #FFFFFF !important;
+        font-weight: 600 !important;
+    }
+
+    /* Base Buttons */
+    div.stButton > button {
+        background-color: #1E293B !important;
+        color: #FFFFFF !important;
+        border: 1px solid #475569 !important;
+        font-weight: 700 !important;
+    }
+    div.stButton > button:hover {
+        background-color: #334155 !important;
+        color: #38BDF8 !important;
+        border-color: #38BDF8 !important;
+    }
+
+    /* Primary Action Buttons */
+    div.stButton > button[kind="primary"] {
+        background-color: #4F46E5 !important;
+        color: #FFFFFF !important;
+        border: none !important;
+        font-weight: 700 !important;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# --- SESSION STATE INITIALIZATION ---
+if "project_state" not in st.session_state:
+    st.session_state.project_state = load_checkpoint()
+
+state = st.session_state.project_state
+
+# --- HEADER SECTION ---
+st.markdown(
+    '<div class="main-header">🤖 Autonomous Agentic SDLC & MDM Engine</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="sub-header">Decoupled Multi-Agent Pipeline with Real-Time'
+    ' State Persistence</div>',
+    unsafe_allow_html=True,
+)
+
+# --- SIDEBAR CONFIGURATION ---
+st.sidebar.header("⚙️ Pipeline Configuration")
+
+# Quick Links to Atlassian Workspace
+atlassian_base = os.getenv("ATLASSIAN_URL", "https://shashankwv.atlassian.net")
+jira_url = f"{atlassian_base}/jira"
+confluence_url = f"{atlassian_base}/wiki"
+
+col_jira, col_conf = st.sidebar.columns(2)
+with col_jira:
+    st.link_button("🔗 Open Jira", jira_url, use_container_width=True)
+with col_conf:
+    st.link_button("📚 Confluence", confluence_url, use_container_width=True)
+
+st.sidebar.divider()
+
+page_id_input = st.sidebar.text_input("Confluence Page ID", value="1966082")
+project_key_input = st.sidebar.text_input("Project Key", value="CBC3")
+jira_ticket = st.sidebar.text_input(
+    "Jira Issue Key", value="JIRA-101-KYC-SCHEMA"
+)
+
+requirement_spec = st.sidebar.text_area(
+    "Confluence / Business Specification",
+    value=(
+        "Generate production master table schema for customer KYC records with"
+        " risk scoring."
+    ),
+)
+execute_live = st.sidebar.checkbox(
+    "Execute Live on Target DB (PostgreSQL)", value=True
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("🚀 Execution Control Panel")
+
+if st.sidebar.button(
+    "🔄 Sync State from Checkpoint File", use_container_width=True
+):
+    st.session_state.project_state = load_checkpoint()
+    st.toast("✅ Session state updated from state_checkpoint_1.json!")
+    st.rerun()
+
+if st.sidebar.button(
+    "⚡ Run Full Pipeline (End-to-End)", type="primary", use_container_width=True
+):
+    state.jira_mdm_issue_key = jira_ticket
+    status_container = st.empty()
+
+    with st.spinner("Executing All Agents..."):
+        status_container.info(
+            "🔄 [1/4] Executing Agent 01 (Live Confluence Parsing)..."
+        )
+        state = run_requirements_agent(
+            state, page_id=page_id_input, project_key=project_key_input
+        )
+        save_checkpoint(state)
+
+        status_container.info("🔄 [2/4] Executing Agent 02 (UI Generation)...")
+        state = run_ui_code_generation_agent(state)
+        save_checkpoint(state)
+
+        status_container.info("🔄 [3/4] Executing Agent 03 (ETL Pipeline)...")
+        state = run_etl_agent(state)
+        save_checkpoint(state)
+
+        status_container.info(
+            "🔄 [4/4] Executing Agent 04/05 (MDM & Postgres)..."
+        )
+        state = run_mdm_agent_autonomous(state, execute_live=execute_live)
+        save_checkpoint(state)
+
+    status_container.success(
+        "🎉 Full Pipeline Executed & All Checkpoints Saved!"
+    )
+    st.session_state.project_state = state
+    st.rerun()
+
+# --- AGENT ACTION BUTTONS ROW ---
+st.markdown("### 🎛️ Agent Execution Grid")
+col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+
+with col_a1:
+    st.markdown("**Agent 01: Requirements**")
+    if st.button("Run Agent 01", key="btn_a1", use_container_width=True):
+        state.jira_mdm_issue_key = jira_ticket
+        with st.spinner("Parsing Live Confluence & Jira Requirements..."):
+            state = run_requirements_agent(
+                state, page_id=page_id_input, project_key=project_key_input
+            )
+            save_checkpoint(state)
+            st.session_state.project_state = state
+        st.toast("Agent 01 Execution Completed!")
+        st.rerun()
+
+with col_a2:
+    st.markdown("**Agent 02: UI Generator**")
+    if st.button("Run Agent 02", key="btn_a2", use_container_width=True):
+        with st.spinner("Generating UI Component Code..."):
+            state = run_ui_code_generation_agent(state)
+            save_checkpoint(state)
+            st.session_state.project_state = state
+        st.toast("Agent 02 Execution Completed!")
+        st.rerun()
+
+with col_a3:
+    st.markdown("**Agent 03: ETL Engine**")
+    if st.button("Run Agent 03", key="btn_a3", use_container_width=True):
+        with st.spinner("Generating & Running Staging ETL..."):
+            state = run_etl_agent(state)
+            save_checkpoint(state)
+            st.session_state.project_state = state
+        st.toast("Agent 03 Execution Completed!")
+        st.rerun()
+
+with col_a4:
+    st.markdown("**Agent 04/05: MDM Target DB**")
+    if st.button("Run Agent 04/05", key="btn_a4", use_container_width=True):
+        with st.spinner("Validating DDL & Executing on Postgres..."):
+            state = run_mdm_agent_autonomous(state, execute_live=execute_live)
+            save_checkpoint(state)
+            st.session_state.project_state = state
+        st.toast("Agent 04/05 Execution Completed!")
+        st.rerun()
+
+st.divider()
+
+# --- STATE INSPECTOR & MANUAL EDITOR SECTION ---
+st.markdown("### 🔍 Live ProjectState Inspector & Editor")
+
+with st.expander("✏️ Edit Session State Variables Directly", expanded=False):
+    st.markdown(
+        "Modify any state variable directly in the JSON payload below and click"
+        " **Apply & Save State Changes**."
+    )
+
+    with st.form("edit_state_form"):
+        raw_json_input = st.text_area(
+            "JSON State Payload",
+            value=state.model_dump_json(indent=2),
+            height=300,
+        )
+
+        submit_changes = st.form_submit_button(
+            "💾 Apply & Save State Changes", type="primary"
+        )
+
+        if submit_changes:
+            try:
+                updated_dict = json.loads(raw_json_input)
+                st.session_state.project_state = ProjectState(**updated_dict)
+                save_checkpoint(st.session_state.project_state)
+
+                st.success("✅ State successfully updated and saved to file!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Invalid JSON structure or state payload: {e}")
+
+st.divider()
+
+# --- MAIN DASHBOARD OUTPUT TABS ---
+tab_summary, tab_a1, tab_a2, tab_a3, tab_a4 = st.tabs([
+    "📊 Pipeline Status",
+    "📋 Agent 01: Requirements Spec",
+    "🖥️ Agent 02: Generated UI Code",
+    "⚙️ Agent 03: ETL Code",
+    "🗄️ Agent 04/05: MDM & PostgreSQL",
+])
+
+# Summary Tab
+with tab_summary:
+    st.subheader("System Architecture & Execution Overview")
+    m1, m2, m3, m4 = st.columns(4)
+
+    a1_done = hasattr(state, "jira_parsed_data") and bool(state.jira_parsed_data)
+    a2_done = hasattr(state, "ui_code") and bool(state.ui_code)
+    a3_done = hasattr(state, "etl_code") and bool(state.etl_code)
+    a4_done = hasattr(state, "mdm_ddl") and bool(state.mdm_ddl)
+
+    m1.metric("Agent 01 (Jira Parser)", "READY ✅" if a1_done else "PENDING ⚪")
+    m2.metric("Agent 02 (UI Engine)", "READY ✅" if a2_done else "PENDING ⚪")
+    m3.metric("Agent 03 (ETL Staging)", "READY ✅" if a3_done else "PENDING ⚪")
+    m4.metric("Agent 04/05 (MDM Deploy)", "READY ✅" if a4_done else "PENDING ⚪")
+
+# Agent 01 Output
+with tab_a1:
+    st.subheader("Parsed Requirements Artifacts")
+    st.json({
+        "page_id": page_id_input,
+        "project_key": project_key_input,
+        "jira_key": jira_ticket,
+        "raw_specification": requirement_spec,
+        "parsed_requirements": getattr(state, "jira_parsed_data", {}),
+    })
+
+# Agent 02 Output
+with tab_a2:
+    st.subheader("Generated React/TypeScript UI Frontend Code")
+    ui_code = getattr(
+        state, "ui_code", "# Agent 02 output will appear here after execution."
+    )
+
+    if hasattr(state, "ui_code") and bool(state.ui_code):
+        sandbox_url = launch_generated_ui_sandbox(ui_code)
+        st.info(
+            "🚀 **Dynamic UI Component Created**: The generated TSX has been"
+            " written to the Vite frontend workspace and a sandbox link is now"
+            " available."
+        )
+        st.link_button(
+            "🚀 Open Generated App Sandbox",
+            sandbox_url,
+            use_container_width=False,
+        )
+
+    st.code(ui_code, language="typescript")
+
+# Agent 03 Output
+with tab_a3:
+    st.subheader("Generated ETL Pipeline Code")
+    etl_code = getattr(
+        state, "etl_code", "# Agent 03 output will appear here after execution."
+    )
+    st.code(etl_code, language="python")
+
+    st.divider()
+    st.subheader("Live DuckDB Staging Query Results (`cleansed_staging_data`)")
+    duckdb_file = PROJECT_ROOT / "staging.duckdb"
+
+    if duckdb_file.exists():
+        try:
+            duck_conn = duckdb.connect(str(duckdb_file), read_only=True)
+            tables = duck_conn.execute("SHOW TABLES").fetchdf()
+
+            if not tables.empty and "cleansed_staging_data" in tables["name"].values:
+                duck_df = duck_conn.execute(
+                    "SELECT * FROM cleansed_staging_data"
+                ).fetchdf()
+                st.caption(f"Showing {len(duck_df)} staging record(s) in DuckDB:")
+                st.dataframe(duck_df, use_container_width=True)
+            else:
+                st.info(
+                    "DuckDB database exists, but table `cleansed_staging_data` has not"
+                    " been created yet. Run Agent 03 to populate staging data."
                 )
-            elif data_type == 'DATE':
-                form_values[name] = st.date_input(
-                    label=label,
-                    value=st.session_state.form_data.get(name, None), # None is appropriate for date_input if no value
-                    key=f"input_{name}",
-                    help=attr['description'],
-                    max_value=date.today() # Date of Birth cannot be in the future
-                )
-            elif 'VARCHAR' in data_type:
-                current_value = st.session_state.form_data.get(name, "")
-                if max_len and max_len > 100: # Use text_area for longer text fields like addresses
-                    form_values[name] = st.text_area(
-                        label=label,
-                        value=current_value,
-                        key=f"input_{name}",
-                        help=attr['description'],
-                        max_chars=max_len
-                    )
-                else: # Default to text_input for shorter VARCHARs
-                    form_values[name] = st.text_input(
-                        label=label,
-                        value=current_value,
-                        key=f"input_{name}",
-                        help=attr['description'],
-                        max_chars=max_len
-                    )
-            # Add other data types (e.g., INT, FLOAT, BOOLEAN) here if they were in the schema
+            duck_conn.close()
+        except Exception as duck_err:
+            st.error(f"DuckDB Connection / Query Error: {duck_err}")
+    else:
+        st.warning(
+            "⚠️ No `staging.duckdb` file found. Run Agent 03 to generate the DuckDB"
+            " staging database."
+        )
 
-    st.markdown("---")
-    submitted = st.form_submit_button("Submit Party Data")
+# Agent 04/05 Output
+with tab_a4:
+    st.subheader("Generated PostgreSQL DDL")
+    ddl_code = getattr(
+        state,
+        "mdm_ddl",
+        "-- Agent 04/05 output will appear here after execution.",
+    )
+    st.code(ddl_code, language="sql")
 
-    if submitted:
-        st.session_state.form_data = form_values # Store current form values
-        st.session_state.form_errors = validate_form(st.session_state.form_data)
+    st.divider()
+    st.subheader("Live PostgreSQL Query Results (`public.customer_master`)")
 
-        if st.session_state.form_errors:
-            st.error("Please correct the errors in the form.")
-            # Rerun to display errors next to fields
-            st.experimental_rerun()
-        else:
-            st.success("Form submitted successfully!")
-            st.write("Submitted Data:")
-            for key, value in st.session_state.form_data.items():
-                st.write(f"- **{key.replace('_', ' ').title()}**: {value}")
-            # Clear form data and errors after successful submission
-            st.session_state.form_data = {}
-            st.session_state.form_errors = {}
-            # Rerun to clear the form
-            st.experimental_rerun()
+    # 1. First trigger auto-recovery to start Docker if offline
+    postgres_ready = ensure_postgres_running("mdm-postgres")
+
+    # 2. Query PostgreSQL only if service is confirmed running
+    if postgres_ready:
+        try:
+            conn = psycopg2.connect(
+                "postgresql://postgres:postgres@localhost:5432/mdm_db"
+            )
+            df = pd.read_sql("SELECT * FROM public.customer_master;", conn)
+            conn.close()
+            st.dataframe(df, use_container_width=True)
+        except Exception as e:
+            st.error(f"PostgreSQL Connection / Query Error: {e}")
+    else:
+        st.error(
+            "❌ Unable to auto-start PostgreSQL container. Please check Docker"
+            " status."
+        )

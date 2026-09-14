@@ -8,16 +8,26 @@ class UICodeResponse(BaseModel):
     )
 
 def generate_ui_code(ui_details: str) -> str:
-    # 1. Fetch your unified LLM instance (which manages fallbacks under the hood)
     base_llm = get_llm()
-    
-    # 2. Bind the Pydantic schema to force structured JSON output across all fallback models
     structured_llm = base_llm.with_structured_output(UICodeResponse)
     
-    # 3. Invoke the structured LLM
-    prompt = f"You are an expert React/TypeScript UI engineer. Generate modular, production-grade TSX code based on the following Jira spec:\n\n{ui_details}"
+    # 1. Provide clear requirements in the system message
+    system_prompt = (
+        "You are an expert React/TypeScript UI engineer. Generate interactive, high-quality TSX components.\n"
+        "Follow these structural & UI guidelines:\n"
+        "1. Imports & Animations: Use `framer-motion` (`motion`, `AnimatePresence`) for smooth step transitions, toggles, and dynamic updates.\n"
+        "2. Multi-Step Form Layout: Structure complex forms into clear progress steps with step indicator headers and dynamic state tracking.\n"
+        "3. Security & Masking Interactivity: Support stateful visibility toggles (e.g., eye icons using `lucide-react`) for confidential inputs like Aadhaar or PIN numbers.\n"
+        "4. Risk/Metrics Visualization: Build custom visual meters (such as multi-color linear progress bars or risk category badges with refresh triggers) rather than plain text outputs.\n"
+        "5. Component Rules: Export a single `default` functional component designed for App.tsx. Include inline Lucide React icons where applicable."
+    )
+
+    human_prompt = f"Jira Specification:\n{ui_details}"
     
-    response: UICodeResponse = structured_llm.invoke(prompt)
+    # 2. Invoke using SystemMessage and HumanMessage structure
+    response: UICodeResponse = structured_llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=human_prompt)
+    ])
     
-    # 4. Return the pure TSX code string directly
     return response.code
