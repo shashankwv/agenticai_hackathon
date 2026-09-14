@@ -1,526 +1,657 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Eye,
   EyeOff,
+  ShieldCheck,
   CheckCircle2,
   AlertCircle,
-  RefreshCw,
-  ShieldCheck,
   CreditCard,
   User,
-  ArrowRight,
-  ArrowLeft,
-  Lock,
-  TrendingUp,
+  FileText,
+  ChevronRight,
+  ChevronLeft,
+  Loader2,
   Sparkles,
-  Building2,
+  Lock,
+  RefreshCw,
   Check,
-  ShieldAlert,
-  Info,
-  FileText
+  Building2,
+  Award
 } from 'lucide-react';
 
+type FormData = {
+  fullName: string;
+  email: string;
+  phone: string;
+  dob: string;
+  aadhaarNumber: string;
+  panNumber: string;
+  creditScore: number | null;
+  creditRating: string;
+  creditFetchDate: string;
+};
+
 const STEPS = [
-  { id: 1, name: 'Personal Information', icon: User },
-  { id: 2, name: 'Aadhaar Verification', icon: ShieldCheck },
-  { id: 3, name: 'Credit Score Bureau', icon: TrendingUp },
-  { id: 4, name: 'Final Review', icon: CheckCircle2 }
+  { id: 'personal', title: 'Personal Info', icon: User },
+  { id: 'identity', title: 'Identity & Aadhaar', icon: FileText },
+  { id: 'credit', title: 'Credit Bureau Integration', icon: CreditCard },
+  { id: 'review', title: 'Review & Submit', icon: ShieldCheck },
 ];
 
 export default function CustomerKYCForm() {
-  const [currentStep, setCurrentStep] = useState<number>(2);
-  const [formData, setFormData] = useState({
-    fullName: 'Ananya Sharma',
-    email: 'ananya.sharma@example.com',
-    phone: '9876543210',
-    pan: 'ABCDE1234F',
-    aadhaar: ''
+  const [currentStep, setCurrentStep] = useState<number>(0);
+  const [showAadhaar, setShowAadhaar] = useState<boolean>(false);
+  const [isFetchingScore, setIsFetchingScore] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  const [formData, setFormData] = useState<FormData>({
+    fullName: '',
+    email: '',
+    phone: '',
+    dob: '',
+    aadhaarNumber: '',
+    panNumber: '',
+    creditScore: null,
+    creditRating: '',
+    creditFetchDate: '',
   });
 
-  // Aadhaar specific state
-  const [showAadhaar, setShowAadhaar] = useState(false);
-  const [aadhaarTouched, setAadhaarTouched] = useState(false);
-  const [aadhaarValid, setAadhaarValid] = useState<boolean | null>(null);
+  // Aadhaar Regex: strict 12 numeric digits
+  const aadhaarRegex = /^\d{12}$/;
+  const isAadhaarValid = aadhaarRegex.test(formData.aadhaarNumber);
 
-  // Credit Score states
-  const [creditScore, setCreditScore] = useState<number | null>(765);
-  const [isFetchingScore, setIsFetchingScore] = useState(false);
-  const [lastUpdated, setLastUpdated] = useState('Just now');
-  const [submitted, setSubmitted] = useState(false);
-
-  // Real-time Aadhaar validation regex: exactly 12 numeric digits
-  const validateAadhaar = (value: string) => {
-    const digitsOnly = value.replace(/\D/g, '');
-    const isValid = /^\d{12}$/.test(digitsOnly);
-    setAadhaarValid(isValid);
-    return isValid;
+  const handleInputChange = (field: keyof FormData, value: string) => {
+    setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
-  const handleAadhaarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const rawValue = e.target.value.replace(/\D/g, '').slice(0, 12);
-    setFormData(prev => ({ ...prev, aadhaar: rawValue }));
-    if (!aadhaarTouched) setAadhaarTouched(true);
-    validateAadhaar(rawValue);
+  const handleBlur = (field: string) => {
+    setTouched((prev) => ({ ...prev, [field]: true }));
   };
 
-  const handleAadhaarBlur = () => {
-    setAadhaarTouched(true);
-    validateAadhaar(formData.aadhaar);
-  };
-
-  const formatAadhaarDisplay = (val: string, masked: boolean) => {
-    if (!val) return '';
-    const parts = val.match(/.{1,4}/g) || [];
-    const formatted = parts.join(' ');
-    if (!masked) return formatted;
-    
-    // Mask first 8 digits with 'X'
-    return formatted.replace(/\d/g, (char, index) => {
-      // Calculate position excluding spaces
-      return index < 10 ? '•' : char;
-    });
-  };
-
-  const refreshCreditScore = () => {
+  const fetchCreditScore = () => {
     setIsFetchingScore(true);
+    // Simulate Credit Bureau API delay
     setTimeout(() => {
-      const simulatedScores = [720, 755, 785, 810, 740];
-      const randomScore = simulatedScores[Math.floor(Math.random() * simulatedScores.length)];
-      setCreditScore(randomScore);
-      setLastUpdated(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      const generatedScore = Math.floor(Math.random() * (850 - 680 + 1)) + 680;
+      let rating = 'Fair';
+      if (generatedScore >= 780) rating = 'Excellent';
+      else if (generatedScore >= 720) rating = 'Good';
+
+      setFormData((prev) => ({
+        ...prev,
+        creditScore: generatedScore,
+        creditRating: rating,
+        creditFetchDate: new Date().toLocaleDateString('en-IN', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      }));
       setIsFetchingScore(false);
-    }, 1200);
+    }, 1800);
   };
 
-  const getRiskCategory = (score: number) => {
-    if (score >= 780) return { label: 'Low Risk', tier: 'Excellent', color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-200', barColor: 'bg-emerald-500', indicator: '90%' };
-    if (score >= 720) return { label: 'Low-Medium Risk', tier: 'Good', color: 'text-blue-600', bg: 'bg-blue-50 border-blue-200', barColor: 'bg-blue-500', indicator: '75%' };
-    if (score >= 650) return { label: 'Medium Risk', tier: 'Fair', color: 'text-amber-600', bg: 'bg-amber-50 border-amber-200', barColor: 'bg-amber-500', indicator: '50%' };
-    return { label: 'High Risk', tier: 'Poor', color: 'text-rose-600', bg: 'bg-rose-50 border-rose-200', barColor: 'bg-rose-500', indicator: '25%' };
+  const isStepValid = (step: number): boolean => {
+    switch (step) {
+      case 0:
+        return !!(
+          formData.fullName.trim() &&
+          formData.email.includes('@') &&
+          formData.phone.length >= 10 &&
+          formData.dob
+        );
+      case 1:
+        return isAadhaarValid && formData.panNumber.length >= 10;
+      case 2:
+        return formData.creditScore !== null;
+      default:
+        return true;
+    }
   };
-
-  const canProceedFromStep2 = aadhaarValid === true;
 
   const handleNext = () => {
-    if (currentStep === 2 && !canProceedFromStep2) {
-      setAadhaarTouched(true);
-      return;
-    }
-    if (currentStep < 4) {
-      setCurrentStep(prev => prev + 1);
-    } else {
-      setSubmitted(true);
+    if (isStepValid(currentStep)) {
+      setCurrentStep((prev) => Math.min(prev + 1, STEPS.length - 1));
     }
   };
 
   const handleBack = () => {
-    if (currentStep > 1) setCurrentStep(prev => prev - 1);
+    setCurrentStep((prev) => Math.max(prev - 1, 0));
   };
 
-  return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-4 md:p-8 font-sans">
-      <div className="w-full max-w-4xl bg-slate-800/90 border border-slate-700/80 rounded-2xl shadow-2xl backdrop-blur-xl overflow-hidden flex flex-col">
-        
-        {/* Header Title Section */}
-        <div className="p-6 md:p-8 border-b border-slate-700/80 bg-gradient-to-r from-slate-900 via-slate-800 to-slate-900">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="p-3 bg-indigo-600/20 rounded-xl border border-indigo-500/30 text-indigo-400">
-                <ShieldCheck className="w-6 h-6" />
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      const response = await fetch('/api/ingest', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          timestamp: new Date().toISOString(),
+          kycData: formData,
+        }),
+      });
+
+      if (response.ok) {
+        setIsSubmitted(true);
+      } else {
+        throw new Error(`Submission failed with status: ${response.status}`);
+      }
+    } catch (err: any) {
+      // Fallback message for demo environment if /api/ingest endpoint isn't live
+      console.warn('API error encountered:', err);
+      setSubmitError(
+        err.message || 'Failed to submit form to server. Please try again.'
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const formatAadhaarDisplay = (val: string) => {
+    if (!val) return '';
+    const clean = val.replace(/\D/g, '').slice(0, 12);
+    if (!showAadhaar) {
+      // Mask first 8 digits
+      if (clean.length <= 8) {
+        return '•'.repeat(clean.length);
+      }
+      return '•'.repeat(8) + ' ' + clean.slice(8);
+    }
+    // Show formatted with spaces
+    return clean.replace(/(\d{4})(?=\d)/g, '$1 ');
+  };
+
+  const renderStepContent = () => {
+    switch (currentStep) {
+      case 0:
+        return (
+          <motion.div
+            key="step-0"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.3 }}
+            className="space-y-4"
+          >
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                Full Legal Name
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Rahul Sharma"
+                value={formData.fullName}
+                onChange={(e) => handleInputChange('fullName', e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600 transition"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  placeholder="rahul@example.com"
+                  value={formData.email}
+                  onChange={(e) => handleInputChange('email', e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600 transition"
+                />
               </div>
               <div>
-                <h1 className="text-xl md:text-2xl font-bold tracking-tight text-white">Regulatory Customer KYC</h1>
-                <p className="text-xs md:text-sm text-slate-400">Aadhaar Identification & Real-time Bureau Assessment</p>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                  Phone Number
+                </label>
+                <input
+                  type="tel"
+                  placeholder="+91 98765 43210"
+                  value={formData.phone}
+                  onChange={(e) => handleInputChange('phone', e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600 transition"
+                />
               </div>
             </div>
-            <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-              <Lock className="w-3 h-3" /> 256-Bit Encrypted
-            </span>
-          </div>
 
-          {/* Multi-step progress bar */}
-          <div className="mt-8 grid grid-cols-4 gap-2 md:gap-4">
-            {STEPS.map((step) => {
-              const StepIcon = step.icon;
-              const isActive = currentStep === step.id;
-              const isCompleted = currentStep > step.id;
-              return (
-                <div key={step.id} className="flex flex-col gap-2">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all duration-300 ${
-                        isCompleted
-                          ? 'bg-emerald-500 text-slate-950'
-                          : isActive
-                          ? 'bg-indigo-600 text-white ring-4 ring-indigo-500/20'
-                          : 'bg-slate-700 text-slate-400'
-                      }`}
-                    >
-                      {isCompleted ? <Check className="w-4 h-4 stroke-[3]" /> : <StepIcon className="w-4 h-4" />}
-                    </div>
-                    <span
-                      className={`hidden md:inline text-xs font-medium truncate ${
-                        isActive ? 'text-indigo-400 font-semibold' : isCompleted ? 'text-slate-200' : 'text-slate-500'
-                      }`}
-                    >
-                      {step.name}
-                    </span>
-                  </div>
-                  <div
-                    className={`h-1.5 rounded-full transition-all duration-500 ${
-                      isCompleted ? 'bg-emerald-500' : isActive ? 'bg-indigo-600' : 'bg-slate-700/60'
-                    }`}
-                  />
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                Date of Birth
+              </label>
+              <input
+                type="date"
+                value={formData.dob}
+                onChange={(e) => handleInputChange('dob', e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-900 focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600 transition"
+              />
+            </div>
+          </motion.div>
+        );
+
+      case 1:
+        return (
+          <motion.div
+            key="step-1"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.3 }}
+            className="space-y-5"
+          >
+            {/* Aadhaar Input Field with Regex & Masking */}
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700">
+                  Aadhaar Number (12 Digits)
+                </label>
+                <span className="text-[11px] font-medium text-emerald-600 flex items-center gap-1">
+                  <Lock className="w-3 h-3" /> UIDAI Encrypted
+                </span>
+              </div>
+
+              <div className="relative">
+                <input
+                  type={showAadhaar ? 'text' : 'password'}
+                  maxLength={12}
+                  placeholder="Enter 12-digit Aadhaar number"
+                  value={formData.aadhaarNumber}
+                  onBlur={() => handleBlur('aadhaarNumber')}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/\D/g, '').slice(0, 12);
+                    handleInputChange('aadhaarNumber', raw);
+                  }}
+                  className={`w-full rounded-lg border px-4 py-2.5 text-sm text-slate-900 font-mono tracking-widest focus:outline-none transition pr-12 ${
+                    touched.aadhaarNumber && !isAadhaarValid
+                      ? 'border-rose-500 focus:ring-1 focus:ring-rose-500 bg-rose-50/20'
+                      : isAadhaarValid
+                      ? 'border-emerald-500 focus:ring-1 focus:ring-emerald-500 bg-emerald-50/20'
+                      : 'border-slate-300 focus:border-indigo-600 focus:ring-1 focus:ring-indigo-600'
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAadhaar(!showAadhaar)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition p-1"
+                  title={showAadhaar ? 'Mask Aadhaar' : 'Show Aadhaar'}
+                >
+                  {showAadhaar ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+
+              {/* Real-time Regex Validation Message */}
+              {touched.aadhaarNumber && !isAadhaarValid && (
+                <p className="mt-1.5 text-xs text-rose-600 flex items-center gap-1 font-medium">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  Must be exactly 12 numeric digits (format: ^\d&#123;12&#125;$)
+                </p>
+              )}
+
+              {isAadhaarValid && (
+                <p className="mt-1.5 text-xs text-emerald-600 flex items-center gap-1 font-medium">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" /> Valid 12-digit Aadhaar format
+                </p>
+              )}
+
+              {/* Visual Masking Preview */}
+              {formData.aadhaarNumber && (
+                <div className="mt-2 p-2 bg-slate-50 rounded border border-slate-200 flex justify-between items-center text-xs text-slate-600 font-mono">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-wider font-sans">
+                    Formatted Preview:
+                  </span>
+                  <span>{formatAadhaarDisplay(formData.aadhaarNumber)}</span>
                 </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+
+            {/* PAN Card Input */}
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-700 mb-1">
+                PAN Number
+              </label>
+              <input
+                type="text"
+                maxLength={10}
+                placeholder="ABCDE1234F"
+                value={formData.panNumber}
+                onChange={(e) => handleInputChange('panNumber', e.target.value.toUpperCase())}
+                className="w-full rounded-lg border border-slate-300 px-4 py-2.5 text-sm text-slate-900 font-mono focus:border-indigo-600 focus:outline-none focus:ring-1 focus:ring-indigo-600 transition uppercase"
+              />
+            </div>
+          </motion.div>
+        );
+
+      case 2:
+        return (
+          <motion.div
+            key="step-2"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.3 }}
+            className="space-y-6"
+          >
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center gap-3">
+              <Building2 className="w-8 h-8 text-indigo-600 shrink-0" />
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800">
+                  Bureau Integration
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Fetch real-time credit metrics using verified PAN ({formData.panNumber || 'N/A'}) & Aadhaar.
+                </p>
+              </div>
+            </div>
+
+            {/* Read-Only Display Element for Calculated Credit Score */}
+            <div className="border border-slate-200 rounded-xl p-5 bg-gradient-to-br from-slate-900 to-indigo-950 text-white relative overflow-hidden shadow-md">
+              <div className="absolute -right-8 -bottom-8 opacity-10 pointer-events-none">
+                <Award className="w-48 h-48 text-indigo-300" />
+              </div>
+
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <span className="text-[11px] font-semibold text-indigo-300 uppercase tracking-wider block">
+                    Calculated Credit Score
+                  </span>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Bureau Query Status: {formData.creditScore ? 'Verified' : 'Pending'}
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wider uppercase bg-white/10 text-indigo-200 border border-white/10">
+                  Read-Only Element
+                </span>
+              </div>
+
+              <div className="flex items-baseline gap-3 my-2">
+                <span className="text-4xl font-extrabold tracking-tight">
+                  {formData.creditScore !== null ? formData.creditScore : '---'}
+                </span>
+                {formData.creditScore && (
+                  <span
+                    className={`text-xs font-semibold px-2 py-0.5 rounded ${'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'}`}
+                  >
+                    {formData.creditRating}
+                  </span>
+                )}
+              </div>
+
+              {/* Score Range Progress Bar */}
+              {formData.creditScore !== null && (
+                <div className="mt-4 space-y-1.5">
+                  <div className="h-2 w-full bg-slate-800 rounded-full overflow-hidden flex">
+                    <div
+                      className="h-full bg-gradient-to-r from-indigo-500 to-emerald-400 transition-all duration-1000 ease-out"
+                      style={{
+                        width: `${Math.min(
+                          Math.max(
+                            ((formData.creditScore - 300) / (900 - 300)) * 100,
+                            0
+                          ),
+                          100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                    <span>300 (Poor)</span>
+                    <span>900 (Excellent)</span>
+                  </div>
+                </div>
+              )}
+
+              {formData.creditFetchDate && (
+                <p className="text-[11px] text-slate-400 mt-4 pt-3 border-t border-white/10 flex items-center justify-between">
+                  <span>Bureau Reference Timestamp</span>
+                  <span className="font-mono text-indigo-200">
+                    {formData.creditFetchDate}
+                  </span>
+                </p>
+              )}
+            </div>
+
+            {/* Trigger Button to Calculate/Fetch Credit Score */}
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={fetchCreditScore}
+                disabled={isFetchingScore}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-sm rounded-lg border border-indigo-200 transition disabled:opacity-50 shadow-sm"
+              >
+                {isFetchingScore ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600" />
+                    Querying Bureau...
+                  </>
+                ) : (
+                  <>
+                    <RefreshCw className="w-4 h-4 text-indigo-600" />
+                    {formData.creditScore ? 'Recalculate Bureau Score' : 'Calculate Credit Score'}
+                  </>
+                )}
+              </button>
+            </div>
+          </motion.div>
+        );
+
+      case 3:
+        return (
+          <motion.div
+            key="step-3"
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -20 }}
+            transition={{ duration: 0.3 }}
+            className="space-y-4"
+          >
+            <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 divide-y divide-slate-200/80">
+              <div className="py-2 flex justify-between items-center text-sm">
+                <span className="text-slate-500 font-medium">Full Name</span>
+                <span className="text-slate-900 font-semibold">{formData.fullName}</span>
+              </div>
+              <div className="py-2 flex justify-between items-center text-sm">
+                <span className="text-slate-500 font-medium">Email & Phone</span>
+                <span className="text-slate-900 font-semibold">
+                  {formData.email} • {formData.phone}
+                </span>
+              </div>
+              <div className="py-2 flex justify-between items-center text-sm">
+                <span className="text-slate-500 font-medium">Aadhaar Number</span>
+                <span className="text-slate-900 font-mono font-semibold">
+                  {formatAadhaarDisplay(formData.aadhaarNumber)}
+                </span>
+              </div>
+              <div className="py-2 flex justify-between items-center text-sm">
+                <span className="text-slate-500 font-medium">PAN Number</span>
+                <span className="text-slate-900 font-mono font-semibold">
+                  {formData.panNumber}
+                </span>
+              </div>
+              <div className="py-2 flex justify-between items-center text-sm">
+                <span className="text-slate-500 font-medium">Calculated Credit Score</span>
+                <span className="text-indigo-600 font-bold font-mono">
+                  {formData.creditScore} ({formData.creditRating})
+                </span>
+              </div>
+            </div>
+
+            {submitError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold">API Submission Note</p>
+                  <p>{submitError}</p>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
+  if (isSubmitted) {
+    return (
+      <div className="max-w-xl mx-auto my-12 p-8 bg-white rounded-2xl shadow-xl border border-slate-100 text-center">
+        <motion.div
+          initial={{ scale: 0.8, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ duration: 0.4 }}
+          className="inline-flex items-center justify-center w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full mb-4"
+        >
+          <Check className="w-8 h-8" />
+        </motion.div>
+        <h2 className="text-2xl font-bold text-slate-900 mb-2">
+          KYC Application Submitted
+        </h2>
+        <p className="text-sm text-slate-600 mb-6">
+          Your Aadhaar verification and Credit Bureau integration data have been successfully posted to the ingest pipeline.
+        </p>
+        <div className="p-4 bg-slate-50 rounded-xl text-left border border-slate-200 text-xs font-mono space-y-1 mb-6 text-slate-700">
+          <p><span className="text-slate-400">Reference ID:</span> {Math.random().toString(36).substring(2, 10).toUpperCase()}</p>
+          <p><span className="text-slate-400">Aadhaar Validated:</span> True (^
+d&#123;12&#125;$)</p>
+          <p><span className="text-slate-400">Calculated Score:</span> {formData.creditScore}</p>
+        </div>
+        <button
+          onClick={() => {
+            setIsSubmitted(false);
+            setCurrentStep(0);
+            setFormData({
+              fullName: '',
+              email: '',
+              phone: '',
+              dob: '',
+              aadhaarNumber: '',
+              panNumber: '',
+              creditScore: null,
+              creditRating: '',
+              creditFetchDate: '',
+            });
+          }}
+          className="px-6 py-2.5 bg-slate-900 text-white font-medium text-sm rounded-lg hover:bg-slate-800 transition"
+        >
+          Start New Registration
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto my-8 p-4 sm:p-6 bg-white rounded-2xl shadow-xl border border-slate-100">
+      {/* Header */}
+      <div className="mb-6 pb-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-indigo-600" /> Customer KYC Registration
+          </h2>
+          <p className="text-xs text-slate-500 mt-1">
+            Complete identity verification & bureau credit score check
+          </p>
+        </div>
+        <span className="px-3 py-1 bg-indigo-50 text-indigo-700 border border-indigo-100 text-xs font-medium rounded-full">
+          Step {currentStep + 1} of {STEPS.length}
+        </span>
+      </div>
+
+      {/* Progress Steps Header */}
+      <div className="mb-8">
+        <div className="flex justify-between relative">
+          {/* Line behind steps */}
+          <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-slate-200 -translate-y-1/2 z-0" />
+          <div
+            className="absolute top-1/2 left-0 h-0.5 bg-indigo-600 -translate-y-1/2 z-0 transition-all duration-300"
+            style={{
+              width: `${(currentStep / (STEPS.length - 1)) * 100}%`,
+            }}
+          />
+
+          {STEPS.map((step, idx) => {
+            const Icon = step.icon;
+            const isCompleted = idx < currentStep;
+            const isCurrent = idx === currentStep;
+
+            return (
+              <div key={step.id} className="relative z-10 flex flex-col items-center">
+                <div
+                  className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
+                    isCompleted
+                      ? 'bg-indigo-600 text-white'
+                      : isCurrent
+                      ? 'bg-indigo-600 text-white ring-4 ring-indigo-100'
+                      : 'bg-slate-100 text-slate-400 border border-slate-300'
+                  }`}
+                >
+                  {isCompleted ? <Check className="w-4 h-4" /> : <Icon className="w-4 h-4" />}
+                </div>
+                <span
+                  className={`text-[11px] font-medium mt-1.5 hidden sm:block ${
+                    isCurrent ? 'text-indigo-600 font-semibold' : 'text-slate-500'
+                  }`}
+                >
+                  {step.title}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Form Content Step Render */}
+      <form onSubmit={handleSubmit}>
+        <div className="min-h-[280px]">
+          <AnimatePresence mode="wait">{renderStepContent()}</AnimatePresence>
         </div>
 
-        {/* Main Content Area */}
-        <div className="p-6 md:p-8 flex-1 min-h-[380px] bg-slate-800/40">
-          {submitted ? (
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="flex flex-col items-center justify-center text-center py-12 space-y-4"
+        {/* Form Controls / Step Navigation */}
+        <div className="mt-8 pt-4 border-t border-slate-100 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={handleBack}
+            disabled={currentStep === 0 || isSubmitting}
+            className="inline-flex items-center gap-1 px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 disabled:opacity-30 disabled:hover:text-slate-600 transition"
+          >
+            <ChevronLeft className="w-4 h-4" /> Back
+          </button>
+
+          {currentStep < STEPS.length - 1 ? (
+            <button
+              type="button"
+              onClick={handleNext}
+              disabled={!isStepValid(currentStep)}
+              className="inline-flex items-center gap-1 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold rounded-lg shadow-sm transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <div className="w-16 h-16 bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 rounded-full flex items-center justify-center">
-                <CheckCircle2 className="w-10 h-10" />
-              </div>
-              <h2 className="text-2xl font-bold text-white">KYC Verification Completed</h2>
-              <p className="text-slate-400 max-w-md text-sm">
-                Aadhaar identity <span className="text-slate-200 font-mono">({formatAadhaarDisplay(formData.aadhaar, true)})</span> and Credit Assessment have been processed and attached to the profile.
-              </p>
-              <button
-                onClick={() => {
-                  setSubmitted(false);
-                  setCurrentStep(1);
-                  setFormData(p => ({ ...p, aadhaar: '' }));
-                  setAadhaarTouched(false);
-                  setAadhaarValid(null);
-                }}
-                className="mt-4 px-6 py-2.5 bg-slate-700 hover:bg-slate-600 text-white rounded-xl text-sm font-semibold transition-colors"
-              >
-                Reset & Run Another Verification
-              </button>
-            </motion.div>
-          ) : (
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={currentStep}
-                initial={{ opacity: 0, x: 15 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -15 }}
-                transition={{ duration: 0.2 }}
-              >
-                {/* Step 1: Personal Information */}
-                {currentStep === 1 && (
-                  <div className="space-y-4 max-w-xl mx-auto">
-                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
-                      <User className="w-5 h-5 text-indigo-400" /> Primary Contact & Identity
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Full Name (As per PAN)</label>
-                        <input
-                          type="text"
-                          value={formData.fullName}
-                          onChange={(e) => setFormData({ ...formData, fullName: e.target.value })}
-                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 transition-colors"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Email Address</label>
-                        <input
-                          type="email"
-                          value={formData.email}
-                          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 transition-colors"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">Mobile Number</label>
-                        <input
-                          type="text"
-                          value={formData.phone}
-                          onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500 transition-colors"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-slate-300 mb-1">PAN Number</label>
-                        <input
-                          type="text"
-                          value={formData.pan}
-                          onChange={(e) => setFormData({ ...formData, pan: e.target.value.toUpperCase() })}
-                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-slate-100 font-mono focus:outline-none focus:border-indigo-500 transition-colors uppercase"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Step 2: Aadhaar Input & Validation */}
-                {currentStep === 2 && (
-                  <div className="max-w-xl mx-auto space-y-6">
-                    <div>
-                      <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                        <ShieldCheck className="w-5 h-5 text-indigo-400" /> Aadhaar Card Verification
-                      </h3>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Enter the 12-digit unique identification number issued by UIDAI.
-                      </p>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
-                        Aadhaar Number <span className="text-rose-400">*</span>
-                      </label>
-                      
-                      <div className="relative flex items-center">
-                        <input
-                          type={showAadhaar ? "text" : "password"}
-                          value={formData.aadhaar}
-                          onChange={handleAadhaarChange}
-                          onBlur={handleAadhaarBlur}
-                          maxLength={12}
-                          placeholder="12 Digit Aadhaar Number"
-                          className={`w-full bg-slate-900/90 border rounded-xl pl-4 pr-24 py-3 text-base font-mono tracking-widest text-slate-100 placeholder:text-slate-600 focus:outline-none transition-all ${
-                            aadhaarTouched
-                              ? aadhaarValid
-                                ? 'border-emerald-500/80 focus:ring-2 focus:ring-emerald-500/20'
-                                : 'border-rose-500 focus:ring-2 focus:ring-rose-500/20'
-                              : 'border-slate-700 focus:border-indigo-500'
-                          }`}
-                        />
-                        
-                        {/* Action Icons Inside Input */}
-                        <div className="absolute right-3 flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setShowAadhaar(!showAadhaar)}
-                            className="p-1.5 text-slate-400 hover:text-slate-200 transition-colors focus:outline-none rounded-lg hover:bg-slate-800"
-                            title={showAadhaar ? "Mask Aadhaar" : "Unmask Aadhaar"}
-                          >
-                            {showAadhaar ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                          </button>
-
-                          {aadhaarTouched && (
-                            aadhaarValid ? (
-                              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                            ) : (
-                              <AlertCircle className="w-5 h-5 text-rose-400" />
-                            )
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Formatted Preview Tag */}
-                      {formData.aadhaar.length > 0 && (
-                        <div className="flex items-center justify-between text-xs text-slate-400 px-1 pt-1 font-mono">
-                          <span>Formatted Preview:</span>
-                          <span className="font-bold text-indigo-300">
-                            {formatAadhaarDisplay(formData.aadhaar, !showAadhaar)}
-                          </span>
-                        </div>
-                      )}
-
-                      {/* Real-time Inline Error Validation Message */}
-                      {aadhaarTouched && !aadhaarValid && (
-                        <motion.div
-                          initial={{ opacity: 0, y: -4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="flex items-center gap-1.5 text-xs text-rose-400 pt-1 font-medium"
-                        >
-                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span>Invalid Aadhaar Number. Must contain exactly 12 numeric digits without symbols.</span>
-                        </motion.div>
-                      )}
-
-                      {aadhaarTouched && aadhaarValid && (
-                        <motion.div
-                          initial={{ opacity: 0, y: -4 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          className="flex items-center gap-1.5 text-xs text-emerald-400 pt-1 font-medium"
-                        >
-                          <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span>Valid 12-digit Aadhaar format verified.</span>
-                        </motion.div>
-                      )}
-                    </div>
-
-                    <div className="bg-slate-900/40 border border-slate-700/50 rounded-xl p-4 flex gap-3 items-start text-xs text-slate-400">
-                      <Info className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />
-                      <span>
-                        Aadhaar details are validated directly via UIDAI regulatory APIs. Information is stored in encrypted format in compliance with RBI KYC norms.
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Step 3: Credit Score Gauge & Risk Metrics */}
-                {currentStep === 3 && (
-                  <div className="max-w-xl mx-auto space-y-6">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                          <TrendingUp className="w-5 h-5 text-indigo-400" /> Calculated Credit Score
-                        </h3>
-                        <p className="text-xs text-slate-400 mt-0.5">
-                          Automated lookup from Credit Information Bureau (CIBIL / Experian)
-                        </p>
-                      </div>
-
-                      <button
-                        onClick={refreshCreditScore}
-                        disabled={isFetchingScore}
-                        className="flex items-center gap-1.5 text-xs font-semibold px-3 py-2 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 rounded-xl transition-all disabled:opacity-50"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isFetchingScore ? 'animate-spin' : ''}`} />
-                        Refresh Score
-                      </button>
-                    </div>
-
-                    {creditScore !== null && (
-                      <div className="bg-slate-900/90 border border-slate-700/80 rounded-2xl p-6 relative overflow-hidden">
-                        {/* Top bar info */}
-                        <div className="flex items-center justify-between pb-4 border-b border-slate-800 text-xs text-slate-400">
-                          <span className="flex items-center gap-1.5">
-                            <Building2 className="w-3.5 h-3.5 text-slate-500" /> Bureau: Experian / CIBIL
-                          </span>
-                          <span>Last synced: {lastUpdated}</span>
-                        </div>
-
-                        {/* Score Metric Visual Meter */}
-                        <div className="py-6 flex flex-col items-center justify-center space-y-4">
-                          {/* Circular/Linear Score Meter Display */}
-                          <div className="relative flex flex-col items-center">
-                            <div className="text-5xl font-extrabold text-white tracking-tight font-mono">
-                              {isFetchingScore ? (
-                                <span className="text-slate-600 animate-pulse">---</span>
-                              ) : (
-                                creditScore
-                              )}
-                            </div>
-                            <div className="text-xs text-slate-400 mt-1">Score Range: 300 - 900</div>
-                          </div>
-
-                          {/* Risk Category Badge */}
-                          {!isFetchingScore && (
-                            <div className={`px-4 py-1.5 rounded-full border text-xs font-bold flex items-center gap-2 ${getRiskCategory(creditScore).bg}`}>
-                              <span className={`w-2 h-2 rounded-full ${getRiskCategory(creditScore).barColor}`} />
-                              <span className={getRiskCategory(creditScore).color}>
-                                {getRiskCategory(creditScore).tier} Tier ({getRiskCategory(creditScore).label})
-                              </span>
-                            </div>
-                          )}
-
-                          {/* Custom Visual Linear Gauge Bar */}
-                          <div className="w-full pt-2">
-                            <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700 relative">
-                              <motion.div
-                                initial={{ width: 0 }}
-                                animate={{ width: isFetchingScore ? '0%' : getRiskCategory(creditScore).indicator }}
-                                transition={{ duration: 0.8, ease: 'easeOut' }}
-                                className={`h-full rounded-full ${getRiskCategory(creditScore).barColor}`}
-                              />
-                            </div>
-                            <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
-                              <span>300 (Poor)</span>
-                              <span>650 (Fair)</span>
-                              <span>750 (Good)</span>
-                              <span>900 (Excellent)</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Read-Only Bureau Key Metrics Grid */}
-                        <div className="grid grid-cols-3 gap-2 pt-4 border-t border-slate-800 text-center">
-                          <div className="bg-slate-800/50 p-2.5 rounded-xl border border-slate-700/50">
-                            <div className="text-[10px] text-slate-400 uppercase">On-Time Payments</div>
-                            <div className="text-sm font-semibold text-emerald-400 mt-0.5">99.4%</div>
-                          </div>
-                          <div className="bg-slate-800/50 p-2.5 rounded-xl border border-slate-700/50">
-                            <div className="text-[10px] text-slate-400 uppercase">Credit Utilization</div>
-                            <div className="text-sm font-semibold text-indigo-400 mt-0.5">18%</div>
-                          </div>
-                          <div className="bg-slate-800/50 p-2.5 rounded-xl border border-slate-700/50">
-                            <div className="text-[10px] text-slate-400 uppercase">Active Enquiries</div>
-                            <div className="text-sm font-semibold text-amber-400 mt-0.5">1 Inquiry</div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Step 4: Final Summary Review */}
-                {currentStep === 4 && (
-                  <div className="max-w-xl mx-auto space-y-4">
-                    <h3 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <FileText className="w-5 h-5 text-indigo-400" /> Review KYC Summary
-                    </h3>
-                    
-                    <div className="bg-slate-900/80 border border-slate-700/80 rounded-2xl divide-y divide-slate-800 text-xs">
-                      <div className="p-4 flex justify-between items-center">
-                        <span className="text-slate-400">Full Applicant Name</span>
-                        <span className="font-semibold text-slate-200">{formData.fullName}</span>
-                      </div>
-                      <div className="p-4 flex justify-between items-center">
-                        <span className="text-slate-400">PAN Number</span>
-                        <span className="font-mono font-semibold text-slate-200">{formData.pan}</span>
-                      </div>
-                      <div className="p-4 flex justify-between items-center">
-                        <span className="text-slate-400">Aadhaar Identification</span>
-                        <span className="font-mono font-semibold text-emerald-400 flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          {formatAadhaarDisplay(formData.aadhaar, !showAadhaar)}
-                        </span>
-                      </div>
-                      <div className="p-4 flex justify-between items-center">
-                        <span className="text-slate-400">Bureau Credit Score</span>
-                        <span className="font-semibold text-indigo-300 bg-indigo-500/10 px-2.5 py-1 rounded-md border border-indigo-500/20">
-                          {creditScore} ({creditScore ? getRiskCategory(creditScore).label : ''})
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </motion.div>
-            </AnimatePresence>
+              Continue <ChevronRight className="w-4 h-4" />
+            </button>            ) : (
+            <button
+              type="submit"
+              disabled={isSubmitting || !isStepValid(currentStep)}
+              className="inline-flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg shadow-sm transition disabled:opacity-50"
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" /> Submitting...
+                </>
+              ) : (
+                <>
+                  <ShieldCheck className="w-4 h-4" /> Submit KYC Form
+                </>
+              )}
+            </button>
           )}
         </div>
-
-        {/* Navigation Controls Footer */}
-        {!submitted && (
-          <div className="p-4 md:p-6 border-t border-slate-700/80 bg-slate-900/60 flex items-center justify-between">
-            <button
-              onClick={handleBack}
-              disabled={currentStep === 1}
-              className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-slate-400 hover:text-white disabled:opacity-40 disabled:hover:text-slate-400 transition-colors"
-            >
-              <ArrowLeft className="w-4 h-4" /> Back
-            </button>
-
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleNext}
-                className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-lg ${
-                  currentStep === 2 && !canProceedFromStep2
-                    ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/20'
-                }`}
-              >
-                {currentStep === 4 ? 'Submit Verification' : 'Continue'}
-                <ArrowRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-      </div>
+      </form>
     </div>
   );
 }

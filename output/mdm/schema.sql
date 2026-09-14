@@ -1,45 +1,37 @@
--- Production PostgreSQL DDL Script for Customer Master Data Management (MDM)
--- Target Schema: public
--- Target Table: customer_master
+-- Production Master Table DDL for Customer KYC Records with Risk Scoring
+-- Schema: public
+-- Table: customer_master
 
--- 1. Table Creation with Data Governance and Constraints
+-- Ensure UUID extension is available
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- Create Customer KYC Master Data Table
 CREATE TABLE IF NOT EXISTS public.customer_master (
-    -- Unique Primary Key using UUID v4 for distributed MDM entity resolution
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-    
-    -- Customer Identification Attributes
     full_name VARCHAR(255) NOT NULL,
-    pan_number VARCHAR(10) NOT NULL UNIQUE, -- Permanent Account Number (India)
-    aadhaar_no VARCHAR(12) NOT NULL UNIQUE, -- 12-digit Unique National ID
-    masked_aadhaar VARCHAR(14),            -- PII governance masked format e.g., 'XXXX-XXXX-1098'
-    
-    -- Financial and Credit Risk Attributes
-    monthly_income DOUBLE PRECISION,
-    credit_score INT CHECK (credit_score BETWEEN 300 AND 900), -- Standard credit score rating bounds
-    risk_index DOUBLE PRECISION,
-    
-    -- Standard MDM Audit Trail Attributes
+    pan_number VARCHAR(10) NOT NULL UNIQUE,
+    masked_aadhaar VARCHAR(14) NOT NULL,
+    monthly_income NUMERIC(15, 2) NOT NULL CHECK (monthly_income >= 0),
+    credit_score INT CHECK (credit_score BETWEEN 300 AND 900),
+    risk_index NUMERIC(5, 2) NOT NULL CHECK (risk_index >= 0 AND risk_index <= 100),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
--- Inline Comments on Column Business Meaning and Security Requirements
-COMMENT ON TABLE public.customer_master IS 'Master Data Management (MDM) table storing canonical golden customer records.';
-COMMENT ON COLUMN public.customer_master.aadhaar_no IS 'Unmasked 12-digit Aadhaar number, restricted access governed by PII policies.';
-COMMENT ON COLUMN public.customer_master.masked_aadhaar IS 'Masked Aadhaar representation for lower-tier reporting applications.';
-COMMENT ON COLUMN public.customer_master.credit_score IS 'Credit score rating ranging from 300 to 900.';
+-- Performance Indexes for MDM queries and filtering
+CREATE INDEX IF NOT EXISTS idx_customer_master_risk_index ON public.customer_master (risk_index);
+CREATE INDEX IF NOT EXISTS idx_customer_master_credit_score ON public.customer_master (credit_score);
 
--- 2. Index Creation for Fast Lookup and Match/Merge Operations
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_master_pan ON public.customer_master(pan_number);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_master_aadhaar ON public.customer_master(aadhaar_no);
-CREATE INDEX IF NOT EXISTS idx_customer_master_credit_score ON public.customer_master(credit_score);
+-- Column Comments for Schema Documentation
+COMMENT ON TABLE public.customer_master IS 'Master table holding customer KYC data, risk scores, and financial profile.';
+COMMENT ON COLUMN public.customer_master.pan_number IS 'Permanent Account Number - unique identifier for tax/identity matching.';
+COMMENT ON COLUMN public.customer_master.masked_aadhaar IS 'Masked Aadhaar identifier in format XXXX-XXXX-1234 for compliance.';
+COMMENT ON COLUMN public.customer_master.risk_index IS 'Calculated operational risk scoring index (0 to 100).';
 
--- 3. Demonstration of Atomic UPSERT Operations (PostgreSQL ON CONFLICT)
--- Inserts a new customer golden record or updates attributes if the Aadhaar number already exists.
+-- Sample UPSERT Statement (Master Data Ingestion Logic based on PAN Number)
 INSERT INTO public.customer_master (
     full_name,
     pan_number,
-    aadhaar_no,
     masked_aadhaar,
     monthly_income,
     credit_score,
@@ -47,15 +39,14 @@ INSERT INTO public.customer_master (
 ) VALUES (
     'Ananya Sharma',
     'ABCDE1234F',
-    '999988881098',
     'XXXX-XXXX-1098',
-    85000.0,
+    85000.00,
     765,
-    22.5
+    22.50
 )
-ON CONFLICT (aadhaar_no) DO UPDATE SET
+ON CONFLICT (pan_number) 
+DO UPDATE SET
     full_name = EXCLUDED.full_name,
-    pan_number = EXCLUDED.pan_number,
     masked_aadhaar = EXCLUDED.masked_aadhaar,
     monthly_income = EXCLUDED.monthly_income,
     credit_score = EXCLUDED.credit_score,

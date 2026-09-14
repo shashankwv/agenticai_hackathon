@@ -18,10 +18,18 @@ class ProjectState(BaseModel):
     jira_ui_task: str = ""
     jira_etl_task: str = ""
     jira_mdm_task: str = ""
-    # Add fields to track created ticket keys from Step 3
+    
+    # Track created ticket keys
     jira_ui_issue_key: Optional[str] = None
     jira_etl_issue_key: Optional[str] = None
     jira_mdm_issue_key: Optional[str] = None
+    
+    # Active Dynamic Server & Execution URLs
+    ui_sandbox_url: Optional[str] = None
+    dynamic_payload_schema: Dict[str, Any] = Field(default_factory=dict)
+
+    # ADD THIS FIELD TO ALLOW DYNAMIC INGESTION PAYLOADS
+    raw_payloads: List[Dict[str, Any]] = Field(default_factory=list)
     
     current_schema: Optional[EntitySchema] = None
     ui_code: str = ""

@@ -1,9 +1,5 @@
 import json
 import os
-import socket
-import subprocess
-import time
-import urllib.request
 from pathlib import Path
 
 import duckdb
@@ -18,89 +14,14 @@ from agents.agent_02_ui_code_generation.step_03_agent import (
 )
 from agents.agent_03_etl.step_04_agent import run_etl_agent
 from agents.agent_04_mdm.step_03_agent import run_mdm_agent_autonomous
-from core.state import ProjectState
-
 from agents.agent_04_mdm.step_05_postgres_executor import (
     ensure_postgres_running,
 )
+from core.state import ProjectState
 
 # --- ABSOLUTE PATH RESOLUTION ---
 PROJECT_ROOT = Path(__file__).resolve().parent
 CHECKPOINT_PATH = PROJECT_ROOT / "state_checkpoint_1.json"
-FRONTEND_UI_DIR = PROJECT_ROOT / "frontend-ui"
-FRONTEND_APP_TSX = FRONTEND_UI_DIR / "src" / "App.tsx"
-
-REACT_PORT_START = 5173
-REACT_PORT_END = 5199
-
-
-def write_ui_code_to_frontend_app(ui_code: str) -> None:
-    """Mirror the generated TSX code into the Vite frontend workspace App.tsx."""
-    FRONTEND_APP_TSX.write_text(ui_code, encoding="utf-8")
-
-
-def format_codespace_or_local_url(port: int) -> str:
-    """Constructs the exact public URL for GitHub Codespaces or localhost."""
-    codespace_name = os.getenv("CODESPACE_NAME")
-    github_domain = os.getenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN", "app.github.dev")
-    
-    if codespace_name:
-        # Automatically make the port public inside Codespaces ifgh CLI is available
-        try:
-            subprocess.run(["gh", "codespace", "ports", "visibility", f"{port}:public"], 
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-        return f"https://{codespace_name}-{port}.{github_domain}/"
-    return f"http://localhost:{port}/"
-
-
-def get_actively_running_vite_port() -> int | None:
-    """Scans local ports to find which port is actually listening and returning Vite assets."""
-    for port in range(REACT_PORT_START, REACT_PORT_END + 1):
-        try:
-            url = f"http://127.0.0.1:{port}"
-            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
-                with urllib.request.urlopen(url, timeout=0.5) as response:
-                    body = response.read(2048).decode("utf-8", errors="ignore")
-                    if response.status < 500 and ("@vite/client" in body or "root" in body.lower() or "<div" in body.lower()):
-                        return port
-        except Exception:
-            continue
-    return None
-
-
-def ensure_react_vite_server() -> str:
-    """Checks for a live Vite server or launches a fresh process, returning the verified URL."""
-    active_port = get_actively_running_vite_port()
-    if active_port is not None:
-        return format_codespace_or_local_url(active_port)
-
-    # If no Vite server is responding, start one on port 5173
-    chosen_port = REACT_PORT_START
-
-    try:
-        subprocess.Popen(
-            f"npm run dev -- --host 0.0.0.0 --port {chosen_port}",
-            cwd=str(FRONTEND_UI_DIR),
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        time.sleep(3.0)
-    except Exception as exc:
-        st.warning(f"Unable to launch Vite dev server automatically: {exc}")
-
-    # Re-verify which port Vite actually bound to after launch
-    actual_port = get_actively_running_vite_port() or chosen_port
-    return format_codespace_or_local_url(actual_port)
-
-
-def launch_generated_ui_sandbox(ui_code: str) -> str:
-    """Writes UI code and returns the verified Vite sandbox URL."""
-    write_ui_code_to_frontend_app(ui_code)
-    return ensure_react_vite_server()
 
 
 # --- HELPER FUNCTIONS FOR STATE PERSISTENCE ---
@@ -234,7 +155,6 @@ st.markdown(
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("⚙️ Pipeline Configuration")
 
-# Quick Links to Atlassian Workspace
 atlassian_base = os.getenv("ATLASSIAN_URL", "https://shashankwv.atlassian.net")
 jira_url = f"{atlassian_base}/jira"
 confluence_url = f"{atlassian_base}/wiki"
@@ -249,9 +169,6 @@ st.sidebar.divider()
 
 page_id_input = st.sidebar.text_input("Confluence Page ID", value="1966082")
 project_key_input = st.sidebar.text_input("Project Key", value="CBC3")
-jira_ticket = st.sidebar.text_input(
-    "Jira Issue Key", value="JIRA-101-KYC-SCHEMA"
-)
 
 requirement_spec = st.sidebar.text_area(
     "Confluence / Business Specification",
@@ -277,7 +194,6 @@ if st.sidebar.button(
 if st.sidebar.button(
     "⚡ Run Full Pipeline (End-to-End)", type="primary", use_container_width=True
 ):
-    state.jira_mdm_issue_key = jira_ticket
     status_container = st.empty()
 
     with st.spinner("Executing All Agents..."):
@@ -316,7 +232,6 @@ col_a1, col_a2, col_a3, col_a4 = st.columns(4)
 with col_a1:
     st.markdown("**Agent 01: Requirements**")
     if st.button("Run Agent 01", key="btn_a1", use_container_width=True):
-        state.jira_mdm_issue_key = jira_ticket
         with st.spinner("Parsing Live Confluence & Jira Requirements..."):
             state = run_requirements_agent(
                 state, page_id=page_id_input, project_key=project_key_input
@@ -329,10 +244,17 @@ with col_a1:
 with col_a2:
     st.markdown("**Agent 02: UI Generator**")
     if st.button("Run Agent 02", key="btn_a2", use_container_width=True):
-        with st.spinner("Generating UI Component Code..."):
+        with st.status("🚀 Launching Vite Dev Server...", expanded=True) as status_box:
+            st.write("Fetching Jira task details & generating React TSX code...")
+            st.write("Stopping existing Vite instances...")
+            st.write("Writing updated TSX to frontend-ui/src/App.tsx...")
+            
             state = run_ui_code_generation_agent(state)
             save_checkpoint(state)
             st.session_state.project_state = state
+            
+            st.write(f"Server live at: {getattr(state, 'ui_sandbox_url', 'N/A')}")
+            status_box.update(label="✅ Vite Server Restarted & Ready!", state="complete")
         st.toast("Agent 02 Execution Completed!")
         st.rerun()
 
@@ -421,7 +343,9 @@ with tab_a1:
     st.json({
         "page_id": page_id_input,
         "project_key": project_key_input,
-        "jira_key": jira_ticket,
+        "jira_ui_key": getattr(state, "jira_ui_issue_key", None),
+        "jira_etl_key": getattr(state, "jira_etl_issue_key", None),
+        "jira_mdm_key": getattr(state, "jira_mdm_issue_key", None),
         "raw_specification": requirement_spec,
         "parsed_requirements": getattr(state, "jira_parsed_data", {}),
     })
@@ -433,18 +357,10 @@ with tab_a2:
         state, "ui_code", "# Agent 02 output will appear here after execution."
     )
 
-    if hasattr(state, "ui_code") and bool(state.ui_code):
-        sandbox_url = launch_generated_ui_sandbox(ui_code)
-        st.info(
-            "🚀 **Dynamic UI Component Created**: The generated TSX has been"
-            " written to the Vite frontend workspace and a sandbox link is now"
-            " available."
-        )
-        st.link_button(
-            "🚀 Open Generated App Sandbox",
-            sandbox_url,
-            use_container_width=False,
-        )
+    sandbox_url = getattr(state, "ui_sandbox_url", None)
+    if sandbox_url:
+        st.success(f"🚀 **Vite Dev Server Active**: {sandbox_url}")
+        st.link_button("🚀 Open Generated App Sandbox", sandbox_url)
 
     st.code(ui_code, language="typescript")
 
@@ -498,10 +414,8 @@ with tab_a4:
     st.divider()
     st.subheader("Live PostgreSQL Query Results (`public.customer_master`)")
 
-    # 1. First trigger auto-recovery to start Docker if offline
     postgres_ready = ensure_postgres_running("mdm-postgres")
 
-    # 2. Query PostgreSQL only if service is confirmed running
     if postgres_ready:
         try:
             conn = psycopg2.connect(

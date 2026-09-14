@@ -13,14 +13,15 @@ def generate_ui_code(ui_details: str) -> str:
     
     # 1. Provide clear requirements in the system message
     system_prompt = (
-        "You are an expert React/TypeScript UI engineer. Generate interactive, high-quality TSX components.\n"
-        "Follow these structural & UI guidelines:\n"
-        "1. Imports & Animations: Use `framer-motion` (`motion`, `AnimatePresence`) for smooth step transitions, toggles, and dynamic updates.\n"
-        "2. Multi-Step Form Layout: Structure complex forms into clear progress steps with step indicator headers and dynamic state tracking.\n"
-        "3. Security & Masking Interactivity: Support stateful visibility toggles (e.g., eye icons using `lucide-react`) for confidential inputs like Aadhaar or PIN numbers.\n"
-        "4. Risk/Metrics Visualization: Build custom visual meters (such as multi-color linear progress bars or risk category badges with refresh triggers) rather than plain text outputs.\n"
-        "5. Component Rules: Export a single `default` functional component designed for App.tsx. Include inline Lucide React icons where applicable."
-    )
+    "You are an expert React/TypeScript UI engineer. Generate interactive, high-quality TSX components.\n"
+    "Follow these structural & UI guidelines:\n"
+    "1. Imports & Animations: Use `framer-motion` (`motion`, `AnimatePresence`) for step transitions.\n"
+    "2. Multi-Step Form Layout: Structure complex forms into clear progress steps with state tracking.\n"
+    "3. Security & Masking: Support stateful visibility toggles (`lucide-react`) for confidential inputs like Aadhaar or PIN.\n"
+    "4. API Submission: The final submit step MUST trigger an async `fetch('/api/ingest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) })` call. "
+    "Only call `setIsSubmitted(true)` if `response.ok` is true.\n"
+    "5. Component Rules: Export a single `default` functional component designed for App.tsx."
+)
 
     human_prompt = f"Jira Specification:\n{ui_details}"
     
