@@ -1,6 +1,10 @@
 import json
 import os
+import socket
+import subprocess
+import time
 from pathlib import Path
+import requests
 
 import duckdb
 import pandas as pd
@@ -12,7 +16,7 @@ from agents.agent_01_requirements.step_04_agent import run_requirements_agent
 from agents.agent_02_ui_code_generation.step_03_agent import (
     run_ui_code_generation_agent,
 )
-from agents.agent_03_etl.step_04_agent import run_etl_agent
+from agents.agent_03_etl.agent_03_etl import run_etl_agent
 from agents.agent_04_mdm.step_03_agent import run_mdm_agent_autonomous
 from agents.agent_04_mdm.step_05_postgres_executor import (
     ensure_postgres_running,
@@ -21,26 +25,69 @@ from core.state import ProjectState
 
 # --- ABSOLUTE PATH RESOLUTION ---
 PROJECT_ROOT = Path(__file__).resolve().parent
-CHECKPOINT_PATH = PROJECT_ROOT / "state_checkpoint_1.json"
+UI_FILE_PATH = PROJECT_ROOT / "streamlit_app.py"
 
 
-# --- HELPER FUNCTIONS FOR STATE PERSISTENCE ---
-def load_checkpoint(filepath: Path = CHECKPOINT_PATH) -> ProjectState:
-    """Loads ProjectState from disk if the file exists."""
-    if filepath.exists():
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return ProjectState(**data)
-    return ProjectState()
+# --- HELPER FUNCTIONS FOR SELF-HEALING UI SERVER ENGINE ---
+def is_port_open(host: str = "127.0.0.1", port: int = 8502) -> bool:
+    """Checks if a TCP port is open and accepting connections."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1.0)
+        return s.connect_ex((host, port)) == 0
 
 
-def save_checkpoint(
-    state: ProjectState, filepath: Path = CHECKPOINT_PATH
-) -> None:
-    """Saves current ProjectState to disk as a JSON checkpoint."""
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(state.model_dump_json(indent=2))
-    st.toast(f"💾 Checkpoint saved to {filepath.name}!")
+def ensure_ui_server_running(state_obj: ProjectState, max_retries: int = 3) -> bool:
+    """
+    Checks if port 8502 is responding. If down, writes st.session_state.project_state.ui_code
+    to streamlit_app.py on disk and spawns the background process.
+    """
+    health_url = "http://127.0.0.1:8502/_stcore/health"
+
+    try:
+        resp = requests.get(health_url, timeout=1.5)
+        if resp.status_code == 200:
+            return True
+    except Exception:
+        pass
+
+    # Dynamic File Creation from Loaded State
+    ui_code_content = getattr(state_obj, "ui_code", None)
+    if not UI_FILE_PATH.exists() and ui_code_content and ui_code_content.strip():
+        with open(UI_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(ui_code_content)
+
+    if not UI_FILE_PATH.exists():
+        return False
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            subprocess.Popen(
+                [
+                    "streamlit",
+                    "run",
+                    "streamlit_app.py",
+                    "--server.port",
+                    "8502",
+                    "--server.headless",
+                    "true",
+                ],
+                cwd=PROJECT_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            for _ in range(10):
+                time.sleep(0.5)
+                try:
+                    res = requests.get(health_url, timeout=1.0)
+                    if res.status_code == 200:
+                        return True
+                except Exception:
+                    continue
+        except Exception as launch_err:
+            print(f"[Self-Healing Attempt {attempt}] Launch error: {launch_err}")
+
+    return False
 
 
 # --- STREAMLIT CONFIGURATION & STYLING ---
@@ -51,13 +98,10 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-    /* App Base Background */
     .stApp {
         background-color: #0E1117;
         color: #E0E6ED;
     }
-    
-    /* Headers */
     .main-header {
         font-size: 2.2rem;
         font-weight: 700;
@@ -71,15 +115,12 @@ st.markdown(
         color: #94A3B8;
         margin-bottom: 1.5rem;
     }
-    
-    /* Input and Textarea Backgrounds & High-Contrast Readable Text */
     div[data-baseweb="textarea"],
     div[data-baseweb="input"],
     div[data-baseweb="base-input"] {
         background-color: #F1F5F9 !important;
         border-radius: 6px !important;
     }
-
     textarea, input,
     div[data-baseweb="textarea"] textarea, 
     div[data-baseweb="input"] input {
@@ -89,16 +130,12 @@ st.markdown(
         font-weight: 600 !important;
         font-family: monospace !important;
     }
-
-    /* Sidebar Input Text Fields */
     section[data-testid="stSidebar"] input,
     section[data-testid="stSidebar"] textarea {
         color: #0F172A !important;
         -webkit-text-fill-color: #0F172A !important;
         background-color: #F1F5F9 !important;
     }
-
-    /* Expander Container styling */
     div[data-testid="stExpander"] {
         background-color: #1E293B !important;
         border: 1px solid #334155 !important;
@@ -109,8 +146,6 @@ st.markdown(
         color: #FFFFFF !important;
         font-weight: 600 !important;
     }
-
-    /* Base Buttons */
     div.stButton > button {
         background-color: #1E293B !important;
         color: #FFFFFF !important;
@@ -122,8 +157,6 @@ st.markdown(
         color: #38BDF8 !important;
         border-color: #38BDF8 !important;
     }
-
-    /* Primary Action Buttons */
     div.stButton > button[kind="primary"] {
         background-color: #4F46E5 !important;
         color: #FFFFFF !important;
@@ -135,9 +168,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- SESSION STATE INITIALIZATION ---
+# --- SESSION STATE INITIALIZATION (DEFAULT BLANK STATE) ---
 if "project_state" not in st.session_state:
-    st.session_state.project_state = load_checkpoint()
+    st.session_state.project_state = ProjectState()
 
 state = st.session_state.project_state
 
@@ -147,8 +180,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="sub-header">Decoupled Multi-Agent Pipeline with Real-Time'
-    ' State Persistence</div>',
+    '<div class="sub-header">Decoupled Multi-Agent Pipeline with In-Memory State Management</div>',
     unsafe_allow_html=True,
 )
 
@@ -184,11 +216,9 @@ execute_live = st.sidebar.checkbox(
 st.sidebar.divider()
 st.sidebar.subheader("🚀 Execution Control Panel")
 
-if st.sidebar.button(
-    "🔄 Sync State from Checkpoint File", use_container_width=True
-):
-    st.session_state.project_state = load_checkpoint()
-    st.toast("✅ Session state updated from state_checkpoint_1.json!")
+if st.sidebar.button("🧹 Reset to Blank State", use_container_width=True):
+    st.session_state.project_state = ProjectState()
+    st.toast("✨ Session reset to blank state!")
     st.rerun()
 
 if st.sidebar.button(
@@ -203,25 +233,19 @@ if st.sidebar.button(
         state = run_requirements_agent(
             state, page_id=page_id_input, project_key=project_key_input
         )
-        save_checkpoint(state)
 
         status_container.info("🔄 [2/4] Executing Agent 02 (UI Generation)...")
         state = run_ui_code_generation_agent(state)
-        save_checkpoint(state)
 
         status_container.info("🔄 [3/4] Executing Agent 03 (ETL Pipeline)...")
         state = run_etl_agent(state)
-        save_checkpoint(state)
 
         status_container.info(
-            "🔄 [4/4] Executing Agent 04/05 (MDM & Postgres)..."
+            "🔄 [4/4] Executing Agent 04 (MDM & Postgres)..."
         )
         state = run_mdm_agent_autonomous(state, execute_live=execute_live)
-        save_checkpoint(state)
 
-    status_container.success(
-        "🎉 Full Pipeline Executed & All Checkpoints Saved!"
-    )
+    status_container.success("🎉 Full Pipeline Executed in Memory!")
     st.session_state.project_state = state
     st.rerun()
 
@@ -236,7 +260,6 @@ with col_a1:
             state = run_requirements_agent(
                 state, page_id=page_id_input, project_key=project_key_input
             )
-            save_checkpoint(state)
             st.session_state.project_state = state
         st.toast("Agent 01 Execution Completed!")
         st.rerun()
@@ -244,17 +267,22 @@ with col_a1:
 with col_a2:
     st.markdown("**Agent 02: UI Generator**")
     if st.button("Run Agent 02", key="btn_a2", use_container_width=True):
-        with st.status("🚀 Launching Vite Dev Server...", expanded=True) as status_box:
-            st.write("Fetching Jira task details & generating React TSX code...")
-            st.write("Stopping existing Vite instances...")
-            st.write("Writing updated TSX to frontend-ui/src/App.tsx...")
+        with st.status("🚀 Generating Streamlit UI Code...", expanded=True) as status_box:
+            st.write("Fetching Jira task details...")
+            st.write("Generating Streamlit Python code...")
+            st.write("Saving output to `streamlit_app.py`...")
             
             state = run_ui_code_generation_agent(state)
-            save_checkpoint(state)
             st.session_state.project_state = state
             
-            st.write(f"Server live at: {getattr(state, 'ui_sandbox_url', 'N/A')}")
-            status_box.update(label="✅ Vite Server Restarted & Ready!", state="complete")
+            st.write("Verifying background process & port 8502...")
+            ui_alive = ensure_ui_server_running(state, max_retries=3)
+            
+            if ui_alive:
+                status_box.update(label="✅ Streamlit App Ready on Port 8502!", state="complete")
+            else:
+                status_box.update(label="⚠️ Code generated, but port 8502 server failed to start.", state="error")
+                
         st.toast("Agent 02 Execution Completed!")
         st.rerun()
 
@@ -263,53 +291,79 @@ with col_a3:
     if st.button("Run Agent 03", key="btn_a3", use_container_width=True):
         with st.spinner("Generating & Running Staging ETL..."):
             state = run_etl_agent(state)
-            save_checkpoint(state)
             st.session_state.project_state = state
         st.toast("Agent 03 Execution Completed!")
         st.rerun()
 
 with col_a4:
-    st.markdown("**Agent 04/05: MDM Target DB**")
-    if st.button("Run Agent 04/05", key="btn_a4", use_container_width=True):
+    st.markdown("**Agent 04: MDM Target DB**")
+    if st.button("Run Agent 04", key="btn_a4", use_container_width=True):
         with st.spinner("Validating DDL & Executing on Postgres..."):
             state = run_mdm_agent_autonomous(state, execute_live=execute_live)
-            save_checkpoint(state)
             st.session_state.project_state = state
-        st.toast("Agent 04/05 Execution Completed!")
+        st.toast("Agent 04 Execution Completed!")
         st.rerun()
 
 st.divider()
 
-# --- STATE INSPECTOR & MANUAL EDITOR SECTION ---
-st.markdown("### 🔍 Live ProjectState Inspector & Editor")
+# --- STATE INSPECTOR & FILE DIALOG IMPORT/EXPORT SECTION ---
+st.markdown("### 🔍 Live ProjectState Inspector & File IO")
 
-with st.expander("✏️ Edit Session State Variables Directly", expanded=False):
-    st.markdown(
-        "Modify any state variable directly in the JSON payload below and click"
-        " **Apply & Save State Changes**."
+with st.expander("📂 Import / Export / Edit Session State", expanded=False):
+    st.markdown("#### 📥 Import State from Computer File")
+    uploaded_file = st.file_uploader(
+        "Select a `.json` state file from your computer",
+        type=["json"],
+        key="state_file_uploader",
     )
+    if uploaded_file is not None:
+        try:
+            file_contents = uploaded_file.read().decode("utf-8")
+            data_dict = json.loads(file_contents)
+            st.session_state.project_state = ProjectState(**data_dict)
+            st.success(f"✅ Successfully imported `{uploaded_file.name}` into memory!")
+            
+            # Automatically write UI code to file upon import if available
+            if getattr(st.session_state.project_state, "ui_code", None):
+                with open(UI_FILE_PATH, "w", encoding="utf-8") as f:
+                    f.write(st.session_state.project_state.ui_code)
+                st.info("📄 Synchronized UI code to `streamlit_app.py`.")
+            st.rerun()
+        except Exception as imp_err:
+            st.error(f"Failed to import file: {imp_err}")
+
+    st.divider()
+    st.markdown("#### ✏️ Live JSON Memory Inspector")
 
     with st.form("edit_state_form"):
         raw_json_input = st.text_area(
-            "JSON State Payload",
+            "JSON State Payload (Memory)",
             value=state.model_dump_json(indent=2),
-            height=300,
+            height=250,
         )
 
-        submit_changes = st.form_submit_button(
-            "💾 Apply & Save State Changes", type="primary"
-        )
+        submit_changes = st.form_submit_button("💾 Apply to Session Memory", type="primary")
 
         if submit_changes:
             try:
                 updated_dict = json.loads(raw_json_input)
                 st.session_state.project_state = ProjectState(**updated_dict)
-                save_checkpoint(st.session_state.project_state)
-
-                st.success("✅ State successfully updated and saved to file!")
+                st.success("✅ Memory state updated successfully!")
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Invalid JSON structure or state payload: {e}")
+
+    st.divider()
+    st.markdown("#### 📤 Export State to Computer File")
+    
+    current_state_json = state.model_dump_json(indent=2)
+    st.download_button(
+        label="💾 Download Current State as JSON",
+        data=current_state_json,
+        file_name="state_checkpoint.json",
+        mime="application/json",
+        use_container_width=True,
+    )
 
 st.divider()
 
@@ -319,7 +373,7 @@ tab_summary, tab_a1, tab_a2, tab_a3, tab_a4 = st.tabs([
     "📋 Agent 01: Requirements Spec",
     "🖥️ Agent 02: Generated UI Code",
     "⚙️ Agent 03: ETL Code",
-    "🗄️ Agent 04/05: MDM & PostgreSQL",
+    "🗄️ Agent 04: MDM & PostgreSQL",
 ])
 
 # Summary Tab
@@ -335,7 +389,7 @@ with tab_summary:
     m1.metric("Agent 01 (Jira Parser)", "READY ✅" if a1_done else "PENDING ⚪")
     m2.metric("Agent 02 (UI Engine)", "READY ✅" if a2_done else "PENDING ⚪")
     m3.metric("Agent 03 (ETL Staging)", "READY ✅" if a3_done else "PENDING ⚪")
-    m4.metric("Agent 04/05 (MDM Deploy)", "READY ✅" if a4_done else "PENDING ⚪")
+    m4.metric("Agent 04 (MDM Deploy)", "READY ✅" if a4_done else "PENDING ⚪")
 
 # Agent 01 Output
 with tab_a1:
@@ -352,17 +406,36 @@ with tab_a1:
 
 # Agent 02 Output
 with tab_a2:
-    st.subheader("Generated React/TypeScript UI Frontend Code")
+    st.subheader("Generated Streamlit UI Code")
     ui_code = getattr(
         state, "ui_code", "# Agent 02 output will appear here after execution."
     )
 
-    sandbox_url = getattr(state, "ui_sandbox_url", None)
-    if sandbox_url:
-        st.success(f"🚀 **Vite Dev Server Active**: {sandbox_url}")
-        st.link_button("🚀 Open Generated App Sandbox", sandbox_url)
+    codespace_name = os.getenv("CODESPACE_NAME")
+    port_forward_template = os.getenv("GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN")
 
-    st.code(ui_code, language="typescript")
+    if codespace_name and port_forward_template:
+        app_url = f"https://{codespace_name}-8502.{port_forward_template}"
+    else:
+        app_url = "http://localhost:8502"
+
+    col_u1, col_u2 = st.columns([1, 3])
+    with col_u1:
+        if st.button("🚀 Start / Launch Existing UI App (Port 8502)", key="btn_launch_ui_direct"):
+            with st.spinner("Connecting / Launching Streamlit Server on Port 8502..."):
+                if ensure_ui_server_running(state, max_retries=3):
+                    st.success("Server is online!")
+                else:
+                    st.error("Could not launch app. No valid `ui_code` in state.")
+
+    with col_u2:
+        is_live = ensure_ui_server_running(state, max_retries=1)
+        if is_live:
+            st.link_button("🌐 Open Active UI Application", app_url, use_container_width=True)
+        else:
+            st.info("ℹ️ UI App Server is offline. Click 'Start / Launch Existing UI App' or run Agent 02.")
+
+    st.code(ui_code, language="python")
 
 # Agent 03 Output
 with tab_a3:
@@ -373,7 +446,7 @@ with tab_a3:
     st.code(etl_code, language="python")
 
     st.divider()
-    st.subheader("Live DuckDB Staging Query Results (`cleansed_staging_data`)")
+    st.subheader("📊 Live DuckDB Staging Explorer & SQL Console (`cleansed_staging_data`)")
     duckdb_file = PROJECT_ROOT / "staging.duckdb"
 
     if duckdb_file.exists():
@@ -383,10 +456,23 @@ with tab_a3:
 
             if not tables.empty and "cleansed_staging_data" in tables["name"].values:
                 duck_df = duck_conn.execute(
-                    "SELECT * FROM cleansed_staging_data"
+                    "SELECT * FROM cleansed_staging_data ORDER BY 1 DESC"
                 ).fetchdf()
                 st.caption(f"Showing {len(duck_df)} staging record(s) in DuckDB:")
                 st.dataframe(duck_df, use_container_width=True)
+
+                with st.expander("🔍 Run Custom DuckDB SQL Query", expanded=False):
+                    custom_query = st.text_area(
+                        "Enter SQL Query:",
+                        value="SELECT count(*) as total_records, avg(credit_score) as avg_score FROM cleansed_staging_data",
+                        height=100,
+                    )
+                    if st.button("Run SQL Query", key="btn_run_duck_sql"):
+                        try:
+                            res_df = duck_conn.execute(custom_query).fetchdf()
+                            st.dataframe(res_df, use_container_width=True)
+                        except Exception as q_err:
+                            st.error(f"SQL Execution Error: {q_err}")
             else:
                 st.info(
                     "DuckDB database exists, but table `cleansed_staging_data` has not"
@@ -397,17 +483,16 @@ with tab_a3:
             st.error(f"DuckDB Connection / Query Error: {duck_err}")
     else:
         st.warning(
-            "⚠️ No `staging.duckdb` file found. Run Agent 03 to generate the DuckDB"
-            " staging database."
+            "⚠️ No `staging.duckdb` file found at root. Run Agent 03 to generate the DuckDB staging database."
         )
 
-# Agent 04/05 Output
+# Agent 04 Output
 with tab_a4:
     st.subheader("Generated PostgreSQL DDL")
     ddl_code = getattr(
         state,
         "mdm_ddl",
-        "-- Agent 04/05 output will appear here after execution.",
+        "-- Agent 04 output will appear here after execution.",
     )
     st.code(ddl_code, language="sql")
 
@@ -428,6 +513,5 @@ with tab_a4:
             st.error(f"PostgreSQL Connection / Query Error: {e}")
     else:
         st.error(
-            "❌ Unable to auto-start PostgreSQL container. Please check Docker"
-            " status."
+            "❌ Unable to auto-start PostgreSQL container. Please check Docker status."
         )
