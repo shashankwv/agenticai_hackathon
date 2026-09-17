@@ -1,10 +1,13 @@
 import json
 import os
-import socket
-import subprocess
-import time
+import sys
 from pathlib import Path
-import requests
+
+# Agent 04's self-healing logs use emoji; Windows consoles default to cp1252,
+# which raises UnicodeEncodeError on print() and crashes the whole request.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import duckdb
 import pandas as pd
@@ -22,72 +25,20 @@ from agents.agent_04_mdm.step_05_postgres_executor import (
     ensure_postgres_running,
 )
 from core.state import ProjectState
+from core.ui_server import ensure_ui_server_running as _ensure_ui_server_running
 
 # --- ABSOLUTE PATH RESOLUTION ---
 PROJECT_ROOT = Path(__file__).resolve().parent
 UI_FILE_PATH = PROJECT_ROOT / "streamlit_app.py"
 
 
-# --- HELPER FUNCTIONS FOR SELF-HEALING UI SERVER ENGINE ---
-def is_port_open(host: str = "127.0.0.1", port: int = 8502) -> bool:
-    """Checks if a TCP port is open and accepting connections."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1.0)
-        return s.connect_ex((host, port)) == 0
-
-
 def ensure_ui_server_running(state_obj: ProjectState, max_retries: int = 3) -> bool:
-    """
-    Checks if port 8502 is responding. If down, writes st.session_state.project_state.ui_code
-    to streamlit_app.py on disk and spawns the background process.
-    """
-    health_url = "http://127.0.0.1:8502/_stcore/health"
-
-    try:
-        resp = requests.get(health_url, timeout=1.5)
-        if resp.status_code == 200:
-            return True
-    except Exception:
-        pass
-
-    # Dynamic File Creation from Loaded State
-    ui_code_content = getattr(state_obj, "ui_code", None)
-    if not UI_FILE_PATH.exists() and ui_code_content and ui_code_content.strip():
-        with open(UI_FILE_PATH, "w", encoding="utf-8") as f:
-            f.write(ui_code_content)
-
-    if not UI_FILE_PATH.exists():
-        return False
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            subprocess.Popen(
-                [
-                    "streamlit",
-                    "run",
-                    "streamlit_app.py",
-                    "--server.port",
-                    "8502",
-                    "--server.headless",
-                    "true",
-                ],
-                cwd=PROJECT_ROOT,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            for _ in range(10):
-                time.sleep(0.5)
-                try:
-                    res = requests.get(health_url, timeout=1.0)
-                    if res.status_code == 200:
-                        return True
-                except Exception:
-                    continue
-        except Exception as launch_err:
-            print(f"[Self-Healing Attempt {attempt}] Launch error: {launch_err}")
-
-    return False
+    """Thin wrapper kept for call-site compatibility: delegates to the
+    single shared implementation in core/ui_server.py (previously this and
+    Agent 02's own orchestrator each had their own separate copy)."""
+    return _ensure_ui_server_running(
+        ui_code=getattr(state_obj, "ui_code", None), max_retries=max_retries
+    )
 
 
 # --- STREAMLIT CONFIGURATION & STYLING ---
@@ -499,13 +450,17 @@ with tab_a4:
     st.divider()
     st.subheader("Live PostgreSQL Query Results (`public.customer_master`)")
 
-    postgres_ready = ensure_postgres_running("mdm-postgres")
+    pg_connection_string = os.getenv(
+        "POSTGRES_CONNECTION_URI",
+        "postgresql://postgres:postgres@localhost:5432/mdm_db",
+    )
+    is_local_pg = "localhost" in pg_connection_string or "127.0.0.1" in pg_connection_string
+
+    postgres_ready = ensure_postgres_running("mdm-postgres") if is_local_pg else True
 
     if postgres_ready:
         try:
-            conn = psycopg2.connect(
-                "postgresql://postgres:postgres@localhost:5432/mdm_db"
-            )
+            conn = psycopg2.connect(pg_connection_string)
             df = pd.read_sql("SELECT * FROM public.customer_master;", conn)
             conn.close()
             st.dataframe(df, use_container_width=True)

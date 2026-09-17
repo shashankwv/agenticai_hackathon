@@ -1,16 +1,47 @@
 import re
+import json
 import streamlit as st
+import requests
+
+# The one live, already-verified ingestion pipeline (ETL cleanse -> DuckDB ->
+# MDM golden-record upsert). The generated form below submits here over HTTP
+# instead of importing a freshly-(re)generated ETL function directly, so it
+# reaches the FULL pipeline — including Agent 04/MDM — reliably, using the
+# same stable backend contract regardless of what Agent 03 most recently
+# generated.
+API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"
+
+
+def submit_to_pipeline(form_data: dict) -> dict:
+    """Posts form_data to the ingestion API. Values from Streamlit widgets
+    (e.g. `date` from st.date_input, `Decimal`-like numbers) aren't always
+    JSON-serializable as-is, and generated form code doesn't reliably
+    remember to convert every field correctly — so serialization happens
+    here once, centrally, with `default=str` as a catch-all for any type
+    json.dumps doesn't natively support."""
+    try:
+        payload = json.dumps(form_data, default=str)
+        resp = requests.post(
+            API_INGEST_URL,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        return resp.json()
+    except Exception as e:
+        return {"status": "error", "message": f"Could not reach the ingestion API: {e}"}
+
 
 st.set_page_config(page_title="KYC Portal", page_icon="🤖", layout="wide")
 
-st.markdown('''
+st.markdown("""
 <style>
     /* Dark slate overall app background */
-    .stApp { 
-        background-color: #0f172a !important; 
-        color: #f8fafc !important; 
+    .stApp {
+        background-color: #0f172a !important;
+        color: #f8fafc !important;
     }
-    
+
     /* Form container styling */
     div[data-testid="stForm"] {
         border: 1px solid #334155 !important;
@@ -19,22 +50,22 @@ st.markdown('''
         padding: 24px !important;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     }
-    
+
     /* 1. INPUT FIELD LABELS (Fixes dark grey unreadable labels) */
-    .stTextInput label, .stTextArea label, .stSelectbox label, 
+    .stTextInput label, .stTextArea label, .stSelectbox label,
     .stNumberInput label, .stDateInput label, div[data-testid="stMarkdownContainer"] p {
         color: #e2e8f0 !important;
         font-weight: 600 !important;
         font-size: 0.95rem !important;
     }
-    
+
     /* 2. ALL INPUT FIELDS (Text, Date, Select, Number, Textarea) */
     div[data-baseweb="input"] input,
     div[data-baseweb="textarea"] textarea,
     div[data-baseweb="select"] div,
-    .stTextInput input, 
-    .stTextArea textarea, 
-    .stDateInput input, 
+    .stTextInput input,
+    .stTextArea textarea,
+    .stDateInput input,
     .stNumberInput input,
     .stSelectbox div[role="combobox"] {
         background-color: #1e293b !important;
@@ -46,17 +77,17 @@ st.markdown('''
     }
 
     /* 3. INPUT FOCUS STATES */
-    div[data-baseweb="input"]:focus-within, 
+    div[data-baseweb="input"]:focus-within,
     div[data-baseweb="textarea"]:focus-within {
         border-color: #6366f1 !important;
     }
-    
+
     /* 4. PLACEHOLDER TEXT CONTRAST */
     textarea::placeholder, input::placeholder {
         color: #94a3b8 !important;
         -webkit-text-fill-color: #94a3b8 !important;
     }
-    
+
     /* 5. PRIMARY SUBMIT BUTTONS */
     div.stButton > button, div[data-testid="stFormSubmitButton"] > button {
         width: 100%;
@@ -69,92 +100,72 @@ st.markdown('''
         padding: 10px 16px !important;
         transition: all 0.2s ease-in-out;
     }
-    
+
     div.stButton > button:hover, div[data-testid="stFormSubmitButton"] > button:hover {
         background-color: #4338ca !important;
         color: #ffffff !important;
     }
 </style>
-''', unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-st.title("Core Banking - Customer 360 Onboarding")
-st.caption("Customer KYC Registration & Bureau Evaluation")
-
-tab1, tab2 = st.tabs(["📋 KYC Registration Form", "ℹ️ Credit Bureau Summary"])
-
-with tab1:
-    with st.form("kyc_form"):
-        st.subheader("Personal & Identity Information")
-        col1, col2 = st.columns(2)
-        with col1:
-            full_name = st.text_input("Full Name", value="", placeholder="e.g. Jane Doe", key="full_name")
-            email = st.text_input("Email Address", value="", placeholder="e.g. jane.doe@example.com", key="email")
-            aadhaar_number = st.text_input("Aadhaar Number", value="", placeholder="Enter 12-digit numeric Aadhaar", key="aadhaar_number")
-        with col2:
-            phone = st.text_input("Phone Number", value="", placeholder="e.g. +91 9876543210", key="phone")
-            dob = st.date_input("Date of Birth", key="dob")
-            pan_number = st.text_input("PAN / Tax ID", value="", placeholder="e.g. ABCDE1234F", key="pan_number")
-
-        st.subheader("Financial & Credit Assessment")
-        col3, col4, col5 = st.columns(3)
-        with col3:
-            address = st.text_area("Residential Address", value="", placeholder="Enter complete street address", key="address")
-        with col4:
-            employment_type = st.selectbox("Employment Type", ["Salaried", "Self-Employed", "Business Owner", "Student", "Other"], key="emp_type")
-            annual_income = st.number_input("Annual Income ($ / ₹)", min_value=0, step=5000, key="income")
-        with col5:
-            credit_score_val = 742
-            st.text_input("Calculated Credit Score", value=f"{credit_score_val}", disabled=True, key="credit_score_display", help="Read-only value retrieved directly from Credit Bureau API")
-            st.caption("✅ Score automatically validated via credit bureau API")
-
-        submit_button = st.form_submit_button("Submit & Process KYC")
-
-    if submit_button:
-        is_valid = True
-        
-        # Strict regex validation for 12-digit numeric Aadhaar
-        if not re.match(r"^\d{12}$", aadhaar_number.strip()):
-            st.error("Invalid Aadhaar Number format. Must be exactly 12 numeric digits.")
-            is_valid = False
-            
-        if not full_name.strip():
-            st.error("Full Name is required.")
-            is_valid = False
-
-        if is_valid:
-            form_data = {
-                "full_name": full_name.strip(),
-                "email": email.strip(),
-                "aadhaar_number": aadhaar_number.strip(),
-                "phone": phone.strip(),
-                "dob": str(dob),
-                "pan_number": pan_number.strip(),
-                "address": address.strip(),
-                "employment_type": employment_type,
-                "annual_income": annual_income,
-                "calculated_credit_score": credit_score_val
-            }
-            try:
-                from etl_pipeline import process_and_store_kyc
-                res = process_and_store_kyc(form_data)
-                if isinstance(res, dict):
-                    if res.get('status') == 'success':
-                        st.success(res.get('message', 'KYC processing completed successfully.'))
-                    elif res.get('status') == 'warning':
-                        st.warning(res.get('message', 'KYC processed with warnings.'))
-                    else:
-                        st.info(res.get('message', 'KYC submission processed.'))
-                else:
-                    st.success("KYC submission processed successfully!")
-            except ImportError:
-                st.warning("ETL pipeline module offline. Simulation mode active.")
-                st.success("Aadhaar validated & KYC submitted successfully!")
-
-with tab2:
-    st.markdown("### Bureau API Info")
-    st.json({
-        "bureau_source": "Experian / CIBIL Gateway",
-        "credit_score": 742,
-        "status": "ACTIVE_QUALIFIED",
-        "inquiries_last_30_days": 1
-    })
+# ===== BEGIN GENERATED FORM =====
+with st.form("kyc_form"):
+    aadhaar = st.text_input(label="Aadhaar Number", value="", placeholder="12-digit Aadhaar number")
+    if not re.match(r"^\\d{12}$", aadhaar):
+        st.error("Aadhaar number must be exactly 12 digits.")
+    
+    full_name = st.text_input(label="Full Name", value="")
+    nominee_name = st.text_input(label="Nominee Name", value="", placeholder="Enter nominee's full name")
+    if not re.match(r"^[a-zA-Z\\s'-]{2,100}$", nominee_name):
+        st.error("Nominee name must be 2-100 characters containing letters, spaces, hyphens, or apostrophes.")
+    
+    dob = st.date_input(label="Date of Birth", value=None)
+    email = st.text_input(label="Email", value="")
+    phone = st.text_input(label="Phone Number", value="")
+    alternate_phone = st.text_input(label="Alternate Contact Number", value="", placeholder="Enter alternate contact number")
+    
+    address_line1 = st.text_input(label="Address Line 1", value="")
+    address_line2 = st.text_input(label="Address Line 2", value="")
+    city = st.text_input(label="City", value="")
+    state = st.text_input(label="State", value="")
+    pincode = st.text_input(label="Pincode", value="")
+    employment_type = st.selectbox(label="Employment Type", options=["Self-employed", "Employee", "Freelancer", "Other"])
+    annual_income = st.number_input(label="Annual Income", min_value=0, max_value=10000000)
+    credit_score = st.number_input(label="Credit Score", min_value=300, max_value=850)
+    terms_accepted = st.checkbox(label="Accept Terms & Conditions", value=False)
+    
+    relationship = st.selectbox(label="Relationship", options=["Spouse", "Parent", "Child", "Other"])
+    
+    calculated_credit_score = st.text_input(label="Calculated Credit Score", value="", disabled=True)
+    
+    submitted = st.form_submit_button("Submit")
+    
+    if submitted:
+        form_data = {
+            "full_name": full_name,
+            "dob": dob,
+            "email": email,
+            "phone": phone,
+            "alternate_phone": alternate_phone,
+            "address_line1": address_line1,
+            "address_line2": address_line2,
+            "city": city,
+            "state": state,
+            "pincode": pincode,
+            "employment_type": employment_type,
+            "annual_income": annual_income,
+            "credit_score": credit_score,
+            "terms_accepted": terms_accepted,
+            "relationship": relationship,
+            "nominee_name": nominee_name,
+            "aadhaar_no": aadhaar
+        }
+        try:
+            res = submit_to_pipeline(form_data)
+            if res.get("status") == "success":
+                st.success(res.get("message", "Submitted successfully."))
+            else:
+                st.warning(res.get("message", "Submitted, but one stage reported an issue."))
+        except Exception as e:
+            st.error(f"Could not reach the ingestion API: {e}")
+# ===== END GENERATED FORM =====

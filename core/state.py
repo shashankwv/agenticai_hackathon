@@ -35,4 +35,9 @@ class ProjectState(BaseModel):
     ui_code: str = ""
     etl_code: str = ""
     mdm_ddl: str = ""
+
+    # Sample of the most recent cleansed ETL output, used to drive Agent 04's
+    # DDL generation from real data instead of a hardcoded example record.
+    sample_cleansed_output: Optional[Dict[str, Any]] = None
+
     errors: List[str] = Field(default_factory=list)

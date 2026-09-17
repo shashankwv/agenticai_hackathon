@@ -1,5 +1,7 @@
 # core/llm_factory.py
 import os
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
 from google.genai.errors import APIError, ClientError, ServerError
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -16,6 +18,49 @@ def get_llm(temperature: float = 0.0, schema=None):
     primary_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    azure_endpoint = os.getenv("AZURE_AI_FOUNDRY_ENDPOINT")
+    azure_key = os.getenv("AZURE_AI_FOUNDRY_KEY")
+    azure_deployment = os.getenv("AZURE_MODEL_DEPLOYMENT")
+
+    # -1. Azure AI Foundry (tried first, everywhere, when configured) — uses
+    # the Azure AI "model inference" API, which is OpenAI-compatible at
+    # <resource-root>/models/chat/completions?api-version=... The endpoint
+    # env var is the project-level URL (.../api/projects/<project>); the
+    # model inference route lives off the bare resource root instead, so
+    # that suffix is stripped here.
+    if azure_endpoint and azure_key and azure_deployment:
+        parsed = urlparse(azure_endpoint)
+        azure_root = f"{parsed.scheme}://{parsed.netloc}"
+        raw_models.append(
+            ChatOpenAI(
+                model=azure_deployment,
+                temperature=temperature,
+                openai_api_key=azure_key,
+                openai_api_base=f"{azure_root}/models",
+                default_query={"api-version": os.getenv("AZURE_AI_FOUNDRY_API_VERSION", "2024-05-01-preview")},
+                max_tokens=8192,
+                timeout=180,
+            )
+        )
+
+    # 0. OpenRouter (OpenAI-compatible endpoint, tried first if configured)
+    if openrouter_key:
+        raw_models.append(
+            ChatOpenAI(
+                model=os.getenv("OPENROUTER_MODEL", "liquid/lfm-2.5-2.6b:free"),
+                temperature=temperature,
+                openai_api_key=openrouter_key,
+                openai_api_base="https://openrouter.ai/api/v1",
+                # Free-tier OpenRouter models default to a low completion cap
+                # and many silently spend most of it on hidden "reasoning"
+                # tokens, truncating longer structured-output responses (e.g.
+                # generated Streamlit code) mid-string. Give it real headroom
+                # for both reasoning and the actual output.
+                max_tokens=8192,
+                timeout=180,
+            )
+        )
 
     # 1. Primary Model
     if primary_key:

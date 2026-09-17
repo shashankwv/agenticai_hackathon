@@ -2,7 +2,10 @@
 from pathlib import Path
 from core.state import ProjectState
 from agents.agent_04_mdm.step_01_jira_reader import fetch_mdm_jira_issue
-from agents.agent_04_mdm.step_02_ddl_generator import generate_production_ddl
+from agents.agent_04_mdm.step_02_ddl_generator import (
+    fetch_existing_customer_master_schema,
+    generate_production_ddl,
+)
 from agents.agent_04_mdm.step_04_runner import validate_ddl_syntax
 from agents.agent_04_mdm.step_05_postgres_executor import execute_mdm_on_postgres
 
@@ -32,9 +35,16 @@ def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, ex
     })
 
     try:
-        # Step 02: Code Generation
-        print("[1/4] Generating production PostgreSQL DDL...")
-        ddl_sql = generate_production_ddl(jira_spec, sample_payload)
+        # Step 02: Code Generation — check the LIVE table's actual current
+        # schema first, so a new Jira story extends it (ALTER ADD COLUMN)
+        # instead of generating a disconnected, unrelated table from the
+        # Jira text alone.
+        existing_schema = fetch_existing_customer_master_schema()
+        print(
+            f"[1/4] Generating production PostgreSQL DDL "
+            f"({'extending existing table' if existing_schema else 'creating new table'})..."
+        )
+        ddl_sql = generate_production_ddl(jira_spec, sample_payload, existing_schema=existing_schema)
         state.mdm_ddl = ddl_sql
 
         # Step 03: Persistence

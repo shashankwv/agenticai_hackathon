@@ -8,7 +8,6 @@ import {
   CreditCard,
   CheckCircle2,
   AlertCircle,
-  ArrowRight,
   ArrowLeft,
   Lock,
   Building2,

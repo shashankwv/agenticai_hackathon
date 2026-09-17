@@ -1,8 +1,12 @@
 # agents/agent_04_mdm/step_05_postgres_executor.py
 import os
+import re
 import subprocess
 import time
 import psycopg2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 def ensure_postgres_running(container_name: str = "mdm-postgres") -> bool:
@@ -101,6 +105,30 @@ def execute_mdm_on_postgres(
       cursor = conn.cursor()
 
       statements = [stmt.strip() for stmt in ddl_sql.split(";") if stmt.strip()]
+      # This script is meant to be schema-only. The LLM prompt tells it not
+      # to include sample INSERT/UPDATE/DELETE statements, but free-tier
+      # models don't always comply — skip any DML defensively so an
+      # "example" statement can never run for real against live data. Strip
+      # full `-- ...` comment LINES first (not just leading dash characters),
+      # since a real statement is often preceded by several lines of
+      # descriptive comments that would otherwise defeat a prefix check.
+      dml_prefixes = ("insert ", "update ", "delete ", "select ", "truncate ")
+      def _is_dml(stmt: str) -> bool:
+        code_only = re.sub(r"(?m)^\s*--.*$", "", stmt).strip().lower()
+        return code_only.startswith(dml_prefixes)
+      statements = [stmt for stmt in statements if not _is_dml(stmt)]
+      # The prompt also asks for `CREATE TABLE IF NOT EXISTS`, but free-tier
+      # models don't reliably include it — enforce it here so re-running
+      # this script against a database that already has the table doesn't
+      # hard-fail with "relation already exists".
+      statements = [
+          re.sub(
+              r"(?im)^(\s*)CREATE TABLE (?!IF NOT EXISTS)",
+              r"\1CREATE TABLE IF NOT EXISTS ",
+              stmt,
+          )
+          for stmt in statements
+      ]
       executed_count = 0
 
       for statement in statements:
