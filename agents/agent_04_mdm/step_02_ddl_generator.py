@@ -50,8 +50,7 @@ def generate_production_ddl(
     ALTER TABLE ADD COLUMN statements for genuinely new fields only, instead
     of generating a fresh, disconnected CREATE TABLE that would silently
     never apply against a table that already has different columns."""
-    base_llm = get_llm()
-    structured_llm = base_llm.with_structured_output(MDMDDLResponse)
+    structured_llm = get_llm(schema=MDMDDLResponse)
 
     if existing_schema:
         schema_lines = "\n".join(f"- {col} ({dtype})" for col, dtype in existing_schema)

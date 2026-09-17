@@ -145,8 +145,7 @@ def generate_etl_pipeline(
     signal for "what fields must keep working", independent of whatever
     code string is or isn't cached in session state.
     """
-    base_llm = get_llm()
-    structured_llm = base_llm.with_structured_output(ETLPipelineResponse)
+    structured_llm = get_llm(schema=ETLPipelineResponse)
 
     context_prefix = ""
     if existing_code:
@@ -343,8 +342,58 @@ def insert_cleansed_records(
     }
 
 
-def run_etl_in_duckdb(etl_code: str, raw_payloads: list[dict], db_filename: str = "staging.duckdb") -> dict:
-    """Executes a generated `transform_batch` script and inserts the results into DuckDB."""
+def sync_cleansed_schema(sample_records: list[dict], db_filename: str = "staging.duckdb") -> dict:
+    """CREATE/ALTER `cleansed_staging_data`'s schema to match `sample_records`'
+    shape, without inserting any rows. This is Workflow 1's DDL step — it
+    mirrors Agent 04's DDL-only behavior for `customer_master`, so a new
+    field's column exists as soon as Agent 03 generates code for it, before
+    any real customer data arrives via Workflow 2's live ingestion (which
+    runs with allow_schema_changes=False and would otherwise silently drop
+    that field)."""
+    if not sample_records:
+        return {"new_columns": []}
+
+    db_path = Path(db_filename)
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_filename
+
+    conn = duckdb.connect(str(db_path))
+    try:
+        df_sample = pd.DataFrame(sample_records)
+        new_columns: list[str] = []
+        tables = [t[0] for t in conn.execute("SHOW TABLES").fetchall()]
+        table_exists = "cleansed_staging_data" in tables
+
+        if not table_exists:
+            conn.register("temp_df", df_sample)
+            conn.execute("CREATE TABLE cleansed_staging_data AS SELECT * FROM temp_df WHERE 1=0")
+            new_columns = list(df_sample.columns)
+        else:
+            existing_cols = [c[0] for c in conn.execute("DESCRIBE cleansed_staging_data").fetchall()]
+            for col in df_sample.columns:
+                if col not in existing_cols:
+                    col_type = _duckdb_type_for(df_sample[col])
+                    conn.execute(f"ALTER TABLE cleansed_staging_data ADD COLUMN {col} {col_type}")
+                    new_columns.append(col)
+    finally:
+        conn.close()
+
+    return {"new_columns": new_columns}
+
+
+def run_etl_in_duckdb(
+    etl_code: str,
+    raw_payloads: list[dict],
+    schema_sample_payloads: list[dict],
+    db_filename: str = "staging.duckdb",
+) -> dict:
+    """Persists a generated `transform_batch` script, always syncs the table's
+    schema against `schema_sample_payloads` (Workflow 1's DDL step — this
+    runs even with zero real records), and, only if `raw_payloads` are real
+    records (not just a validation sample), inserts the transformed results.
+    Called with an empty `raw_payloads` list when there's no real data yet,
+    so re-running Agent 03 with no new real data doesn't duplicate rows on
+    every click, while still keeping the schema current."""
     etl_script_path = PROJECT_ROOT / "etl_pipeline.py"
 
     # Persist code to project root for streamlit_app.py imports
@@ -354,6 +403,16 @@ def run_etl_in_duckdb(etl_code: str, raw_payloads: list[dict], db_filename: str 
     local_scope = {"__file__": str(etl_script_path)}
     exec(etl_code, local_scope, local_scope)
     transform_fn = local_scope["transform_batch"]
+
+    schema_result = sync_cleansed_schema(transform_fn(schema_sample_payloads), db_filename=db_filename)
+
+    if not raw_payloads:
+        return {
+            "status": "SUCCESS",
+            "processed_count": 0,
+            "sample_output": {},
+            "new_columns": schema_result["new_columns"],
+        }
 
     cleansed_records = transform_fn(raw_payloads)
     return insert_cleansed_records(cleansed_records, db_filename=db_filename)
@@ -428,10 +487,13 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
             or "Generate production KYC cleaning pipeline with Aadhaar masking and risk calculation into cleansed_staging_data."
         )
 
-    # Input payloads: fallback to seed payloads if state is empty. Computed
-    # BEFORE the retry loop so validation actually exercises transform_batch
-    # against these exact records, not some other/empty sample.
-    input_payloads = raw_payloads or getattr(state, "raw_payloads", None) or DEFAULT_SEED_PAYLOADS
+    # Real payloads to actually write to DuckDB — empty when this run has no
+    # new real data, so a re-run doesn't re-insert stale records.
+    real_payloads = raw_payloads or getattr(state, "raw_payloads", None) or []
+    # Validation always exercises transform_batch against a concrete sample so
+    # self-healing catches data-shape bugs even when there's no real data yet
+    # (e.g. the very first run, before any UI submission has occurred).
+    validation_payloads = real_payloads or DEFAULT_SEED_PAYLOADS
 
     # Self-Healing Retry Loop
     max_retries = 3
@@ -449,6 +511,7 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
         f"{'extending ' + str(len(existing_schema)) + ' existing columns' if existing_schema else 'table does not exist yet'}"
     )
 
+    err_type, err_traceback = "LLM Generation Error", ""
     for attempt in range(1, max_retries + 1):
         logger.info(f"Generating ETL Pipeline (Attempt {attempt}/{max_retries})...")
         try:
@@ -464,9 +527,10 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
             logger.warning(f"⚠️ [ETL GENERATION ERROR] Attempt {attempt}/{max_retries}: {e}")
             healing_context = f"# ERROR CATEGORY: LLM Generation Error\n# DETAIL:\n{e}\n"
             is_valid = False
+            err_type, err_traceback = "LLM Generation Error", str(e)
             continue
 
-        is_valid, err_type, err_traceback = validate_etl_code(etl_code, sample_payloads=input_payloads)
+        is_valid, err_type, err_traceback = validate_etl_code(etl_code, sample_payloads=validation_payloads)
         if is_valid:
             logger.info(f"✅ [SELF-HEALING SUCCESS] Valid ETL pipeline code generated on attempt #{attempt}!")
             break
@@ -485,12 +549,15 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
         logger.error(error_msg)
         state.errors.append(error_msg)
         state.etl_code = etl_code
-        result = insert_cleansed_records(default_transform_batch(input_payloads))
+        if real_payloads:
+            result = insert_cleansed_records(default_transform_batch(real_payloads))
+        else:
+            result = {"status": "SUCCESS", "processed_count": 0, "sample_output": {}, "new_columns": []}
     else:
         state.etl_code = etl_code
-        logger.info(f"Executing ETL runner against DuckDB with {len(input_payloads)} record(s)...")
+        logger.info(f"Executing ETL runner against DuckDB with {len(real_payloads)} real record(s)...")
         try:
-            result = run_etl_in_duckdb(state.etl_code, input_payloads)
+            result = run_etl_in_duckdb(state.etl_code, real_payloads, validation_payloads)
         except Exception as e:
             # Validation passed against these same payloads moments ago, so
             # this should be rare, but never let an execution-time surprise
@@ -498,7 +565,10 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
             error_msg = f"Agent 03: validated ETL code raised at execution time ({e}); falling back to default transform."
             logger.error(error_msg)
             state.errors.append(error_msg)
-            result = insert_cleansed_records(default_transform_batch(input_payloads))
+            if real_payloads:
+                result = insert_cleansed_records(default_transform_batch(real_payloads))
+            else:
+                result = {"status": "SUCCESS", "processed_count": 0, "sample_output": {}, "new_columns": []}
 
     if result.get("sample_output"):
         state.sample_cleansed_output = result["sample_output"]

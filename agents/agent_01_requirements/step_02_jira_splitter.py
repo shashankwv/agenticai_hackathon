@@ -25,7 +25,7 @@ class JiraTaskBreakdown(BaseModel):
 
 def split_requirement_into_jira_tasks(confluence_text: str) -> JiraTaskBreakdown:
   """Uses Gemini to analyze a Confluence spec and output 3 distinct Jira tasks."""
-  llm = get_llm(temperature=0.0)
+  structured_llm = get_llm(temperature=0.0, schema=JiraTaskBreakdown)
 
   prompt = ChatPromptTemplate.from_messages([
       (
@@ -38,5 +38,5 @@ def split_requirement_into_jira_tasks(confluence_text: str) -> JiraTaskBreakdown
       ("user", "Business Requirement Document:\n{confluence_text}"),
   ])
 
-  chain = prompt | llm.with_structured_output(JiraTaskBreakdown)
+  chain = prompt | structured_llm
   return chain.invoke({"confluence_text": confluence_text})

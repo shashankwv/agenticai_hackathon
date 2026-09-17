@@ -111,19 +111,35 @@ st.markdown("""
 # ===== BEGIN GENERATED FORM =====
 with st.form("kyc_form"):
     aadhaar = st.text_input(label="Aadhaar Number", value="", placeholder="12-digit Aadhaar number")
-    if not re.match(r"^\\d{12}$", aadhaar):
+    if not re.match(r"^\d{12}$", aadhaar):
         st.error("Aadhaar number must be exactly 12 digits.")
-    
+
     full_name = st.text_input(label="Full Name", value="")
     nominee_name = st.text_input(label="Nominee Name", value="", placeholder="Enter nominee's full name")
-    if not re.match(r"^[a-zA-Z\\s'-]{2,100}$", nominee_name):
+    if not re.match(r"^[a-zA-Z\s'-]{2,100}$", nominee_name):
         st.error("Nominee name must be 2-100 characters containing letters, spaces, hyphens, or apostrophes.")
-    
+
     dob = st.date_input(label="Date of Birth", value=None)
     email = st.text_input(label="Email", value="")
-    phone = st.text_input(label="Phone Number", value="")
-    alternate_phone = st.text_input(label="Alternate Contact Number", value="", placeholder="Enter alternate contact number")
-    
+
+    contact_col1, contact_col2 = st.columns(2)
+    with contact_col1:
+        phone = st.text_input(label="Phone Number", value="")
+    with contact_col2:
+        alternate_phone = st.text_input(label="Alternate Contact Number (optional)", value="", placeholder="Enter alternate contact number")
+
+    alternate_phone_valid = True
+    if alternate_phone:
+        if not re.match(r"^\d+$", alternate_phone):
+            alternate_phone_valid = False
+            st.error("Alternate Contact Number must contain numeric characters only.")
+        elif not re.match(r"^\d{10}$", alternate_phone):
+            alternate_phone_valid = False
+            st.error("Alternate Contact Number must be exactly 10 digits.")
+        elif alternate_phone == phone:
+            alternate_phone_valid = False
+            st.error("Alternate Contact Number must be different from Primary Contact Number")
+
     address_line1 = st.text_input(label="Address Line 1", value="")
     address_line2 = st.text_input(label="Address Line 2", value="")
     city = st.text_input(label="City", value="")
@@ -133,20 +149,23 @@ with st.form("kyc_form"):
     annual_income = st.number_input(label="Annual Income", min_value=0, max_value=10000000)
     credit_score = st.number_input(label="Credit Score", min_value=300, max_value=850)
     terms_accepted = st.checkbox(label="Accept Terms & Conditions", value=False)
-    
+
     relationship = st.selectbox(label="Relationship", options=["Spouse", "Parent", "Child", "Other"])
-    
+
     calculated_credit_score = st.text_input(label="Calculated Credit Score", value="", disabled=True)
-    
+
     submitted = st.form_submit_button("Submit")
-    
-    if submitted:
+
+if submitted:
+    if not alternate_phone_valid:
+        st.error("Please correct the Alternate Contact Number before submitting.")
+    else:
         form_data = {
             "full_name": full_name,
             "dob": dob,
             "email": email,
             "phone": phone,
-            "alternate_phone": alternate_phone,
+            "alternate_contact_number": alternate_phone,
             "address_line1": address_line1,
             "address_line2": address_line2,
             "city": city,
@@ -164,6 +183,19 @@ with st.form("kyc_form"):
             res = submit_to_pipeline(form_data)
             if res.get("status") == "success":
                 st.success(res.get("message", "Submitted successfully."))
+                # Read-only profile summary for contact numbers
+                summary_col1, summary_col2 = st.columns(2)
+                with summary_col1:
+                    st.text_input(label="Primary Contact Number", value=phone, disabled=True)
+                with summary_col2:
+                    alternate_display = alternate_phone
+                    if not alternate_display:
+                        alternate_display = "\u2014"
+                    st.text_input(label="Alternate Contact Number", value=alternate_display, disabled=True)
+                # Read-only display for calculated credit score
+                calc_credit = res.get("calculated_credit_score")
+                if calc_credit is not None:
+                    st.text_input(label="Calculated Credit Score", value=str(calc_credit), disabled=True)
             else:
                 st.warning(res.get("message", "Submitted, but one stage reported an issue."))
         except Exception as e:

@@ -1,9 +1,9 @@
 # core/llm_factory.py
 import os
-from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from google.genai.errors import APIError, ClientError, ServerError
+from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import GoogleAPIError, GoogleRateLimitError
 from langchain_groq import ChatGroq
@@ -17,34 +17,29 @@ def get_llm(temperature: float = 0.0, schema=None):
 
     primary_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
-    openai_key = os.getenv("OPENAI_API_KEY")
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     azure_endpoint = os.getenv("AZURE_AI_FOUNDRY_ENDPOINT")
     azure_key = os.getenv("AZURE_AI_FOUNDRY_KEY")
     azure_deployment = os.getenv("AZURE_MODEL_DEPLOYMENT")
 
-    # -1. Azure AI Foundry (tried first, everywhere, when configured) — uses
-    # the Azure AI "model inference" API, which is OpenAI-compatible at
-    # <resource-root>/models/chat/completions?api-version=... The endpoint
-    # env var is the project-level URL (.../api/projects/<project>); the
-    # model inference route lives off the bare resource root instead, so
-    # that suffix is stripped here.
+    # -1. Azure AI Foundry (tried first, everywhere, when configured) — this
+    # deployment is a Claude model exposed via Azure's native Anthropic
+    # Messages API at <resource-root>/anthropic/v1/messages, not the
+    # OpenAI-compatible route, so it's called through ChatAnthropic with
+    # base_url pointed at the Azure resource instead of api.anthropic.com.
     if azure_endpoint and azure_key and azure_deployment:
-        parsed = urlparse(azure_endpoint)
-        azure_root = f"{parsed.scheme}://{parsed.netloc}"
         raw_models.append(
-            ChatOpenAI(
+            ChatAnthropic(
                 model=azure_deployment,
-                temperature=temperature,
-                openai_api_key=azure_key,
-                openai_api_base=f"{azure_root}/models",
-                default_query={"api-version": os.getenv("AZURE_AI_FOUNDRY_API_VERSION", "2024-05-01-preview")},
+                api_key=azure_key,
+                base_url=azure_endpoint,
                 max_tokens=8192,
                 timeout=180,
             )
         )
 
-    # 0. OpenRouter (OpenAI-compatible endpoint, tried first if configured)
+    # 0. OpenRouter — immediate fallback when Azure is unreachable/erroring
+    # (or when Azure isn't configured at all).
     if openrouter_key:
         raw_models.append(
             ChatOpenAI(
@@ -98,17 +93,7 @@ def get_llm(temperature: float = 0.0, schema=None):
     #     )
 
 
-    # 3. Secondary Non-Google Fallback
-    if openai_key:
-        raw_models.append(
-            ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=temperature,
-                openai_api_key=openai_key,
-            )
-        )
-
-    # 4. Backup Gemini Models
+    # 3. Backup Gemini Models
     if primary_key:
         raw_models.append(
             ChatGoogleGenerativeAI(
@@ -128,9 +113,18 @@ def get_llm(temperature: float = 0.0, schema=None):
     if not raw_models:
         raise ValueError("No valid API keys found in environment.")
 
-    # Bind schema to every model
+    # Bind schema to every model. The Azure-hosted Claude deployment rejects
+    # forced tool-choice ("tool_choice: any/tool" — the default strategy
+    # `with_structured_output` uses for Anthropic models), so ChatAnthropic
+    # instances need the "json_schema" method instead; other providers are
+    # unaffected and keep the default "function_calling" method.
     if schema is not None:
-        bound_models = [m.with_structured_output(schema) for m in raw_models]
+        bound_models = [
+            m.with_structured_output(schema, method="json_schema")
+            if isinstance(m, ChatAnthropic)
+            else m.with_structured_output(schema)
+            for m in raw_models
+        ]
         primary = bound_models[0]
         fallbacks = bound_models[1:]
     else:

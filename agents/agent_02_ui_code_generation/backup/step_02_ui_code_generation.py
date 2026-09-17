@@ -176,8 +176,7 @@ def extract_form_code(existing_file_content: str) -> str | None:
 def generate_ui_form_code(ui_details: str, existing_form_code: str = None) -> str:
     """Generates or incrementally updates ONLY the KYC form body, based on the
     scope of the current Jira UI story — not the whole page."""
-    base_llm = get_llm()
-    structured_llm = base_llm.with_structured_output(StreamlitFormCodeResponse)
+    structured_llm = get_llm(schema=StreamlitFormCodeResponse)
 
     system_prompt = """
 You are an expert Enterprise Python Streamlit UI engineer.

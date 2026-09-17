@@ -10,7 +10,25 @@ load_dotenv()
 
 
 def ensure_postgres_running(container_name: str = "mdm-postgres") -> bool:
-  """Checks if PostgreSQL is running, and attempts to start or launch it if offline."""
+  """Checks if PostgreSQL is running, and attempts to start or launch it if offline.
+
+  Tries a direct connection to the actually-configured POSTGRES_CONNECTION_URI
+  first — e.g. a natively-installed local PostgreSQL service (no Docker
+  involved at all) already satisfies "is it running", and assuming Docker
+  management is needed just because the host is localhost would otherwise
+  make this report failure (and skip real work) even though the database is
+  right there and reachable.
+  """
+  try:
+    conn = psycopg2.connect(
+        os.getenv("POSTGRES_CONNECTION_URI", "postgresql://postgres:postgres@localhost:5432/mdm_db"),
+        connect_timeout=3,
+    )
+    conn.close()
+    return True
+  except Exception:
+    pass
+
   try:
     check_cmd = f"docker inspect -f '{{{{.State.Running}}}}' {container_name}"
     result = subprocess.run(
