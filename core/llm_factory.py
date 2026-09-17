@@ -1,23 +1,66 @@
-# core/llm_factory.py
 import os
+import logging
 from dotenv import load_dotenv
+
+# Exception Imports
 from google.genai.errors import APIError, ClientError, ServerError
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai.chat_models import GoogleAPIError, GoogleRateLimitError
 from langchain_groq import ChatGroq
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def get_llm(temperature: float = 0.0, schema=None):
     raw_models = []
 
+    # Fetch Environment Keys & Configs
+    azure_endpoint = os.getenv("AZURE_AI_FOUNDRY_ENDPOINT")
+    azure_key = os.getenv("AZURE_AI_FOUNDRY_KEY")
+    azure_deployment = os.getenv("AZURE_MODEL_DEPLOYMENT", "claude-fable-5-1")
+
     primary_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
 
-    # 1. Primary Model
+    # -------------------------------------------------------------------
+    # 1. Primary Model: Azure AI Foundry Deployment (Claude or Azure OpenAI)
+    # -------------------------------------------------------------------
+    if azure_endpoint and azure_key:
+        try:
+            # Try Anthropic / Azure AI Foundry Client Integration
+            from langchain_azure_ai import AzureAIAnthropicChatModel
+
+            logger.info(f"🤖 Initializing Azure AI Foundry Claude model: {azure_deployment}")
+            raw_models.append(
+                AzureAIAnthropicChatModel(
+                    endpoint=azure_endpoint,
+                    credential=azure_key,
+                    model=azure_deployment,
+                    temperature=temperature,
+                )
+            )
+        except (ImportError, Exception) as e:
+            logger.warning(f"⚠️ AzureAIAnthropicChatModel unavailable ({e}). Falling back to AzureChatOpenAI...")
+            
+            # Fallback to standard AzureChatOpenAI if Azure OpenAI deployment is used
+            raw_models.append(
+                AzureChatOpenAI(
+                    azure_endpoint=azure_endpoint,
+                    api_key=azure_key,
+                    azure_deployment=azure_deployment,
+                    api_version="2024-06-01",
+                    temperature=temperature,
+                )
+            )
+
+    # -------------------------------------------------------------------
+    # 2. Secondary Primary: Primary Gemini Model
+    # -------------------------------------------------------------------
     if primary_key:
         raw_models.append(
             ChatGoogleGenerativeAI(
@@ -27,14 +70,14 @@ def get_llm(temperature: float = 0.0, schema=None):
             )
         )
 
-
+    # -------------------------------------------------------------------
+    # 3. Secondary Fallback: Groq (Fast Inference)
+    # -------------------------------------------------------------------
     if groq_key:
         raw_models.append(
             ChatGroq(
                 model="qwen/qwen3.8-27b",
                 temperature=temperature,
-                # max_tokens=600,  # Caps expected output below 1000 OTPM
-                # max_retries=0,   # Instantly triggers fallbacks if rate limited
                 groq_api_key=groq_key,
             )
         )
@@ -51,9 +94,8 @@ def get_llm(temperature: float = 0.0, schema=None):
     #             groq_api_key=groq_key,
     #         )
     #     )
-
-
-    # 3. Secondary Non-Google Fallback
+    # 4. Tertiary Fallback: OpenAI
+    # -------------------------------------------------------------------
     if openai_key:
         raw_models.append(
             ChatOpenAI(
@@ -63,7 +105,9 @@ def get_llm(temperature: float = 0.0, schema=None):
             )
         )
 
-    # 4. Backup Gemini Models
+    # -------------------------------------------------------------------
+    # 5. Backup Gemini Models
+    # -------------------------------------------------------------------
     if primary_key:
         raw_models.append(
             ChatGoogleGenerativeAI(
@@ -81,9 +125,11 @@ def get_llm(temperature: float = 0.0, schema=None):
         )
 
     if not raw_models:
-        raise ValueError("No valid API keys found in environment.")
+        raise ValueError("❌ No valid API keys found in environment. Please check your .env file.")
 
-    # Bind schema to every model
+    # -------------------------------------------------------------------
+    # Bind Schema & Structure Models
+    # -------------------------------------------------------------------
     if schema is not None:
         bound_models = [m.with_structured_output(schema) for m in raw_models]
         primary = bound_models[0]

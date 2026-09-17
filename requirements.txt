@@ -18,3 +18,5 @@ polars
 rill
 psycopg2-binary
 streamlit
+langchain_azure_ai
+langchain-anthropic
