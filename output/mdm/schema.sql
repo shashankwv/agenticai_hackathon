@@ -1,144 +1,139 @@
--- =============================================================================
--- MDM Task: Master Schema Governance
--- Object   : public.customer_master (Customer Profile Master / Golden Record)
--- Purpose  : Initial creation of the Customer Master table including the new
---            optional PII attribute ALTERNATE_CONTACT_NUMBER, database-level
---            data-quality constraints, audit/history capture, and indexes.
--- Target   : PostgreSQL 13+ (gen_random_uuid() is built-in from PG13; the
---            pgcrypto extension line below keeps the script portable to PG12).
--- Rollout  : DEV -> QA/UAT -> PROD per release calendar (CAB approval required).
--- =============================================================================
+-- ============================================================================
+-- MDM: Core Banking Customer 360 -- Master Schema Governance
+-- Object      : public.customer_master
+-- Script      : V001__create_customer_master.sql  (forward migration)
+-- Rollback    : V001__create_customer_master__rollback.sql (see block at end)
+-- Owner       : MDM Platform / DBA / Data Governance
+-- Notes       : The table does NOT exist yet, therefore aadhaar_no and
+--               credit_score are created inline with their full constraints.
+--               No phased add-nullable -> backfill -> enforce NOT NULL step is
+--               required because there are no pre-existing rows to violate
+--               NOT NULL / UNIQUE. If this script is ever re-pointed at an
+--               environment where the table already exists, use the phased
+--               ALTER TABLE strategy documented in the rollback/notes block.
+-- ============================================================================
 
--- Safe on PG13+ (no-op) and required on PG12 for gen_random_uuid().
+-- gen_random_uuid() is core in PostgreSQL 13+. pgcrypto keeps the script
+-- portable to PostgreSQL 10-12 without changing the DDL below.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- -----------------------------------------------------------------------------
--- 1. CORE MASTER TABLE
--- -----------------------------------------------------------------------------
--- Design decisions:
---   * Surrogate PK is a UUID (id) so golden records can be minted by any node
---     without sequence contention and are globally unique across environments.
---   * customer_id is the immutable BUSINESS KEY used for match/survivorship and
---     for the UPSERT conflict target; therefore it is NOT NULL + UNIQUE.
---   * Contact numbers are stored as VARCHAR(20) (E.164 max is 15 digits; extra
---     headroom for future prefix handling). ALTERNATE_CONTACT_NUMBER mirrors the
---     PRIMARY_CONTACT_NUMBER type/length exactly, as mandated by the spec.
---   * ALTERNATE_CONTACT_NUMBER is NULLable (optional attribute, no backfill).
---   * All contact number columns are classified PII: apply column-level masking
---     / encryption via the enterprise data-protection policy (same policy as
---     PRIMARY_CONTACT_NUMBER). Classification is recorded via COMMENT ON below.
+-- ----------------------------------------------------------------------------
+-- 1. Golden record table
+-- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.customer_master (
-    -- Standard MDM audit / identity columns (first creation only)
-    id                          UUID            DEFAULT gen_random_uuid() PRIMARY KEY,
-    created_at                  TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
-    updated_at                  TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    -- Standard MDM audit / surrogate key columns (first creation only)
+    id                  UUID         DEFAULT gen_random_uuid() PRIMARY KEY,
+    created_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
 
-    -- Business key (source-agnostic enterprise customer identifier)
-    customer_id                 VARCHAR(50)     NOT NULL,
+    -- Business / natural key: Customer Information File (CIF) number issued by
+    -- the core banking system. Kept separate from the surrogate UUID so that
+    -- ETL UPSERTs can target a stable business identifier.
+    customer_id         VARCHAR(20)  NOT NULL,
 
-    -- Core profile attributes
-    first_name                  VARCHAR(100)    NOT NULL,
-    middle_name                 VARCHAR(100),
-    last_name                   VARCHAR(100)    NOT NULL,
-    date_of_birth               DATE,
-    gender                      VARCHAR(20),
-    email_address               VARCHAR(255),
+    -- Identity attributes
+    first_name          VARCHAR(100) NOT NULL,
+    middle_name         VARCHAR(100),
+    last_name           VARCHAR(100) NOT NULL,
+    date_of_birth       DATE,
+    gender              VARCHAR(10),
 
-    -- Contact numbers (PII) -- alternate mirrors primary type/length per spec
-    primary_contact_number      VARCHAR(20),
-    alternate_contact_number    VARCHAR(20),          -- NEW optional attribute
+    -- Contact attributes (PII - restricted)
+    email               VARCHAR(255),
+    mobile_no           VARCHAR(15),
 
-    -- Address attributes
-    address_line_1              VARCHAR(255),
-    address_line_2              VARCHAR(255),
-    city                        VARCHAR(100),
-    state_province              VARCHAR(100),
-    postal_code                 VARCHAR(20),
-    country_code                CHAR(2),              -- ISO 3166-1 alpha-2
+    -- Regulatory identifiers (PII - sensitive)
+    pan_no              VARCHAR(10),
 
-    -- MDM lineage / governance attributes
-    customer_status             VARCHAR(20)     NOT NULL DEFAULT 'ACTIVE',
-    source_system               VARCHAR(50),
-    source_record_id            VARCHAR(100),
-    golden_record_flag          BOOLEAN         NOT NULL DEFAULT TRUE,
-    record_version              INTEGER         NOT NULL DEFAULT 1,
-    last_modified_by            VARCHAR(100),
-    last_modified_channel       VARCHAR(50),
+    -- Aadhaar number for Aadhaar-based KYC.
+    -- Spec: VARCHAR(12) NOT NULL UNIQUE. Classified SENSITIVE PII:
+    --   * encryption-at-rest mandatory (tablespace/TDE or column-level pgcrypto
+    --     handled by the platform; DDL keeps clear VARCHAR(12) per contract),
+    --   * access restricted to KYC role; masked in all non-production copies.
+    -- The UNIQUE constraint implicitly creates a B-tree index that also
+    -- serves the ETL UPSERT / de-duplication lookups.
+    aadhaar_no          VARCHAR(12)  NOT NULL,
 
-    -- Business key uniqueness (also the UPSERT conflict target)
-    CONSTRAINT uq_customer_master_customer_id UNIQUE (customer_id),
+    -- Automated credit score. Source lineage: ETL risk computation / bureau.
+    -- Nullable because a score may not yet exist for a newly onboarded
+    -- customer. Valid range is 300-900 (Indian bureau scale).
+    credit_score        INT,
+    credit_score_source VARCHAR(50),      -- e.g. CIBIL, EXPERIAN, INTERNAL_RISK_ETL
+    credit_score_as_of  DATE,             -- effective date of the score
 
-    -- Controlled vocabulary for lifecycle status
-    CONSTRAINT chk_customer_master_status
-        CHECK (customer_status IN ('ACTIVE', 'INACTIVE', 'SUSPENDED', 'MERGED', 'DELETED')),
+    -- KYC lifecycle
+    kyc_status          VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
+    kyc_verified_at     TIMESTAMP,
 
-    -- DQ Rule: numeric-only, standard mobile length (10-15 digits) for PRIMARY
-    CONSTRAINT chk_customer_master_primary_contact_format
-        CHECK (primary_contact_number IS NULL OR primary_contact_number ~ '^[0-9]{10,15}$'),
+    -- Address attributes (PII - restricted)
+    address_line1       VARCHAR(255),
+    address_line2       VARCHAR(255),
+    city                VARCHAR(100),
+    state               VARCHAR(100),
+    postal_code         VARCHAR(10),
+    country_code        CHAR(2)      NOT NULL DEFAULT 'IN',
 
-    -- DQ Rule: numeric-only, standard mobile length (10-15 digits) for ALTERNATE
-    CONSTRAINT chk_customer_master_alt_contact_format
-        CHECK (alternate_contact_number IS NULL OR alternate_contact_number ~ '^[0-9]{10,15}$'),
+    -- Master-data lifecycle / lineage
+    customer_status     VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
+    source_system       VARCHAR(50),      -- originating system of record
+    record_version      INT          NOT NULL DEFAULT 1,
 
-    -- Governance Rule: ALTERNATE_CONTACT_NUMBER <> PRIMARY_CONTACT_NUMBER when not NULL
-    -- (NULL on either side passes; equality of two populated values is rejected)
-    CONSTRAINT chk_customer_master_alt_contact_not_equal_primary
-        CHECK (
-            alternate_contact_number IS NULL
-            OR primary_contact_number IS NULL
-            OR alternate_contact_number <> primary_contact_number
-        ),
-
-    -- ISO country code must be exactly two uppercase letters when supplied
-    CONSTRAINT chk_customer_master_country_code
-        CHECK (country_code IS NULL OR country_code ~ '^[A-Z]{2}$')
+    -- ------------------------------------------------------------------------
+    -- Named constraints: explicit names make CI validation, rollback and
+    -- error messages deterministic across environments.
+    -- ------------------------------------------------------------------------
+    CONSTRAINT uq_customer_master_customer_id  UNIQUE (customer_id),
+    CONSTRAINT uq_customer_master_aadhaar_no   UNIQUE (aadhaar_no),
+    CONSTRAINT ck_customer_master_aadhaar_fmt  CHECK (aadhaar_no ~ '^[0-9]{12}$'),
+    CONSTRAINT ck_customer_master_credit_score CHECK (credit_score BETWEEN 300 AND 900),
+    CONSTRAINT ck_customer_master_gender       CHECK (gender IS NULL OR gender IN ('MALE','FEMALE','OTHER','UNKNOWN')),
+    CONSTRAINT ck_customer_master_kyc_status   CHECK (kyc_status IN ('PENDING','VERIFIED','REJECTED','EXPIRED')),
+    CONSTRAINT ck_customer_master_cust_status  CHECK (customer_status IN ('ACTIVE','INACTIVE','DORMANT','CLOSED')),
+    CONSTRAINT ck_customer_master_pan_fmt      CHECK (pan_no IS NULL OR pan_no ~ '^[A-Z]{5}[0-9]{4}[A-Z]$'),
+    CONSTRAINT ck_customer_master_email_fmt    CHECK (email IS NULL OR position('@' in email) > 1),
+    CONSTRAINT ck_customer_master_updated_ge_created CHECK (updated_at >= created_at)
 );
 
--- Data dictionary metadata (business definition, owner, sensitivity)
-COMMENT ON TABLE  public.customer_master IS
-    'Customer Master golden record. Owner: Customer Data Domain. Contains PII.';
-COMMENT ON COLUMN public.customer_master.customer_id IS
-    'Enterprise business key for the customer; immutable; UPSERT conflict target.';
-COMMENT ON COLUMN public.customer_master.primary_contact_number IS
-    'Primary mobile number. PII - RESTRICTED. Numeric only, 10-15 digits. Masking/encryption per Contact Number policy.';
-COMMENT ON COLUMN public.customer_master.alternate_contact_number IS
-    'Optional alternate mobile number. PII - RESTRICTED. Same type/length/masking as PRIMARY_CONTACT_NUMBER. Must differ from primary when populated. NOT used in match rules (survivorship: most-recent-non-null).';
-COMMENT ON COLUMN public.customer_master.last_modified_channel IS
-    'Originating channel of the last change (e.g., UI, ETL, API, BATCH). Copied to audit history.';
+-- ----------------------------------------------------------------------------
+-- 2. Secondary indexes
+--    Note: PRIMARY KEY (id), UNIQUE (customer_id) and UNIQUE (aadhaar_no)
+--    already create B-tree indexes; do not duplicate them.
+-- ----------------------------------------------------------------------------
+-- Case-insensitive email lookups from UI search / ETL matching.
+CREATE INDEX IF NOT EXISTS ix_customer_master_email_lower
+    ON public.customer_master (lower(email));
 
--- -----------------------------------------------------------------------------
--- 2. INDEXES
--- -----------------------------------------------------------------------------
--- Name-based search / match candidate generation
-CREATE INDEX IF NOT EXISTS idx_customer_master_last_first_name
-    ON public.customer_master (last_name, first_name);
+-- Mobile-based customer search (contact-centre / OTP flows).
+CREATE INDEX IF NOT EXISTS ix_customer_master_mobile_no
+    ON public.customer_master (mobile_no);
 
--- Case-insensitive e-mail lookup (common match key)
-CREATE INDEX IF NOT EXISTS idx_customer_master_email_lower
-    ON public.customer_master (LOWER(email_address))
-    WHERE email_address IS NOT NULL;
+-- Partial index: only non-null PAN values are worth indexing.
+CREATE INDEX IF NOT EXISTS ix_customer_master_pan_no
+    ON public.customer_master (pan_no)
+    WHERE pan_no IS NOT NULL;
 
--- Contact number lookups; partial indexes keep them small since values are optional
-CREATE INDEX IF NOT EXISTS idx_customer_master_primary_contact
-    ON public.customer_master (primary_contact_number)
-    WHERE primary_contact_number IS NOT NULL;
+-- Operational filtering by KYC / customer lifecycle state.
+CREATE INDEX IF NOT EXISTS ix_customer_master_kyc_status
+    ON public.customer_master (kyc_status);
 
-CREATE INDEX IF NOT EXISTS idx_customer_master_alt_contact
-    ON public.customer_master (alternate_contact_number)
-    WHERE alternate_contact_number IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_customer_master_customer_status
+    ON public.customer_master (customer_status);
 
--- Source lineage lookups for ETL reconciliation
-CREATE INDEX IF NOT EXISTS idx_customer_master_source
-    ON public.customer_master (source_system, source_record_id);
+-- Risk analytics: range scans on credit score (partial - skip unscored rows).
+CREATE INDEX IF NOT EXISTS ix_customer_master_credit_score
+    ON public.customer_master (credit_score)
+    WHERE credit_score IS NOT NULL;
 
--- Incremental extract / CDC support for downstream consumers
-CREATE INDEX IF NOT EXISTS idx_customer_master_updated_at
+-- Incremental / CDC extraction by ETL.
+CREATE INDEX IF NOT EXISTS ix_customer_master_updated_at
     ON public.customer_master (updated_at);
 
--- -----------------------------------------------------------------------------
--- 3. updated_at MAINTENANCE TRIGGER
--- -----------------------------------------------------------------------------
--- Keeps updated_at accurate regardless of which client/ETL performs the write.
+-- ----------------------------------------------------------------------------
+-- 3. updated_at maintenance trigger
+--    Guarantees updated_at is always refreshed on UPDATE regardless of whether
+--    the calling ETL/UI sets it, and bumps record_version for optimistic
+--    concurrency / lineage.
+-- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.fn_customer_master_set_updated_at()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -156,151 +151,117 @@ CREATE TRIGGER trg_customer_master_set_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION public.fn_customer_master_set_updated_at();
 
--- -----------------------------------------------------------------------------
--- 4. AUDIT / HISTORY STRUCTURE (attribute-level change capture)
--- -----------------------------------------------------------------------------
--- Design decisions:
---   * Attribute-level (long/narrow) history: one row per changed column so the
---     same structure serves ALTERNATE_CONTACT_NUMBER and PRIMARY_CONTACT_NUMBER
---     without further DDL when additional attributes are onboarded.
---   * Captures old value, new value, changed_by, channel, timestamp, operation.
---   * changed_by / channel are resolved from session GUCs (mdm.changed_by,
---     mdm.channel) set by the application/ETL, falling back to the row-level
---     lineage columns and finally to the DB session_user.
---   * FK to customer_master is intentionally omitted (ON DELETE would erase
---     history); the customer_master_id + customer_id pair provides lineage.
-CREATE TABLE IF NOT EXISTS public.customer_master_audit (
-    id                  UUID            DEFAULT gen_random_uuid() PRIMARY KEY,
-    created_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
-    updated_at          TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
-    customer_master_id  UUID            NOT NULL,
-    customer_id         VARCHAR(50)     NOT NULL,
-    column_name         VARCHAR(63)     NOT NULL,
-    old_value           VARCHAR(255),
-    new_value           VARCHAR(255),
-    operation           VARCHAR(10)     NOT NULL,
-    changed_by          VARCHAR(100)    NOT NULL,
-    channel             VARCHAR(50)     NOT NULL,
-    changed_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_customer_master_audit_operation
-        CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE'))
-);
+-- ----------------------------------------------------------------------------
+-- 4. Data dictionary / MDM catalogue metadata (queryable via pg_description)
+-- ----------------------------------------------------------------------------
+COMMENT ON TABLE  public.customer_master IS
+    'Customer 360 golden record. System of record for master customer attributes. Domain: Core Banking. Steward: Data Governance.';
+COMMENT ON COLUMN public.customer_master.id IS
+    'Surrogate primary key (UUID v4). Internal only; never exposed as a business identifier.';
+COMMENT ON COLUMN public.customer_master.customer_id IS
+    'Business/natural key: core banking CIF number. UPSERT conflict target for ETL.';
+COMMENT ON COLUMN public.customer_master.aadhaar_no IS
+    'Classification: SENSITIVE PII (Aadhaar). 12-digit numeric. NOT NULL UNIQUE. Encryption-at-rest required; access restricted to KYC_OFFICER role; must be masked (XXXX-XXXX-1234) in logs, UI and non-prod environments.';
+COMMENT ON COLUMN public.customer_master.credit_score IS
+    'Automated credit score, valid range 300-900. Lineage: ETL risk computation / credit bureau feed. NULL = not yet scored.';
+COMMENT ON COLUMN public.customer_master.credit_score_source IS
+    'Provenance of credit_score (e.g. CIBIL, EXPERIAN, INTERNAL_RISK_ETL).';
+COMMENT ON COLUMN public.customer_master.credit_score_as_of IS
+    'Effective/as-of date of credit_score as reported by the source.';
+COMMENT ON COLUMN public.customer_master.pan_no IS
+    'Classification: SENSITIVE PII (PAN). Format AAAAA9999A.';
+COMMENT ON COLUMN public.customer_master.email IS
+    'Classification: RESTRICTED PII.';
+COMMENT ON COLUMN public.customer_master.mobile_no IS
+    'Classification: RESTRICTED PII.';
+COMMENT ON COLUMN public.customer_master.created_at IS
+    'MDM audit: row creation timestamp (server time).';
+COMMENT ON COLUMN public.customer_master.updated_at IS
+    'MDM audit: last modification timestamp, maintained by trigger.';
 
-COMMENT ON TABLE public.customer_master_audit IS
-    'Attribute-level change history for Customer Master PII contact attributes. Contains PII - apply same masking as source columns.';
+-- ----------------------------------------------------------------------------
+-- 5. Access control baseline for PII (roles are provisioned by the platform)
+--    Left as governance guidance; uncomment once roles exist in target env.
+-- ----------------------------------------------------------------------------
+-- REVOKE ALL ON public.customer_master FROM PUBLIC;
+-- GRANT SELECT (id, customer_id, first_name, last_name, kyc_status, customer_status, credit_score)
+--     ON public.customer_master TO app_readonly;
+-- GRANT SELECT, INSERT, UPDATE ON public.customer_master TO mdm_etl_writer;
+-- GRANT SELECT (aadhaar_no, pan_no) ON public.customer_master TO kyc_officer;
 
-CREATE INDEX IF NOT EXISTS idx_customer_master_audit_customer
-    ON public.customer_master_audit (customer_master_id, changed_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_customer_master_audit_column_time
-    ON public.customer_master_audit (column_name, changed_at DESC);
-
--- Trigger function: writes history rows for ALTERNATE_CONTACT_NUMBER (and
--- PRIMARY_CONTACT_NUMBER for consistency) whenever the value changes.
--- NOTE: the INSERT inside this function is part of the audit mechanism
---       definition (schema), not data seeding.
-CREATE OR REPLACE FUNCTION public.fn_customer_master_contact_audit()
-RETURNS TRIGGER
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    v_changed_by VARCHAR(100);
-    v_channel    VARCHAR(50);
-BEGIN
-    v_changed_by := COALESCE(
-        NULLIF(current_setting('mdm.changed_by', true), ''),
-        CASE WHEN TG_OP = 'DELETE' THEN OLD.last_modified_by ELSE NEW.last_modified_by END,
-        session_user::VARCHAR
-    );
-    v_channel := COALESCE(
-        NULLIF(current_setting('mdm.channel', true), ''),
-        CASE WHEN TG_OP = 'DELETE' THEN OLD.last_modified_channel ELSE NEW.last_modified_channel END,
-        'UNKNOWN'
-    );
-
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.alternate_contact_number IS NOT NULL THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (NEW.id, NEW.customer_id, 'alternate_contact_number', NULL, NEW.alternate_contact_number, TG_OP, v_changed_by, v_channel);
-        END IF;
-        IF NEW.primary_contact_number IS NOT NULL THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (NEW.id, NEW.customer_id, 'primary_contact_number', NULL, NEW.primary_contact_number, TG_OP, v_changed_by, v_channel);
-        END IF;
-        RETURN NEW;
-
-    ELSIF TG_OP = 'UPDATE' THEN
-        -- IS DISTINCT FROM handles NULL <-> value transitions correctly
-        IF NEW.alternate_contact_number IS DISTINCT FROM OLD.alternate_contact_number THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (NEW.id, NEW.customer_id, 'alternate_contact_number', OLD.alternate_contact_number, NEW.alternate_contact_number, TG_OP, v_changed_by, v_channel);
-        END IF;
-        IF NEW.primary_contact_number IS DISTINCT FROM OLD.primary_contact_number THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (NEW.id, NEW.customer_id, 'primary_contact_number', OLD.primary_contact_number, NEW.primary_contact_number, TG_OP, v_changed_by, v_channel);
-        END IF;
-        RETURN NEW;
-
-    ELSIF TG_OP = 'DELETE' THEN
-        IF OLD.alternate_contact_number IS NOT NULL THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (OLD.id, OLD.customer_id, 'alternate_contact_number', OLD.alternate_contact_number, NULL, TG_OP, v_changed_by, v_channel);
-        END IF;
-        IF OLD.primary_contact_number IS NOT NULL THEN
-            INSERT INTO public.customer_master_audit
-                (customer_master_id, customer_id, column_name, old_value, new_value, operation, changed_by, channel)
-            VALUES
-                (OLD.id, OLD.customer_id, 'primary_contact_number', OLD.primary_contact_number, NULL, TG_OP, v_changed_by, v_channel);
-        END IF;
-        RETURN OLD;
-    END IF;
-
-    RETURN NULL;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_customer_master_contact_audit ON public.customer_master;
-CREATE TRIGGER trg_customer_master_contact_audit
-    AFTER INSERT OR UPDATE OR DELETE ON public.customer_master
-    FOR EACH ROW
-    EXECUTE FUNCTION public.fn_customer_master_contact_audit();
-
--- -----------------------------------------------------------------------------
--- 5. INTENDED UPSERT PATTERN (documentation only - NOT executed by this script)
--- -----------------------------------------------------------------------------
--- ETL / MDM hub should merge on the business key customer_id. Surrogate id,
--- created_at and record_version are never overwritten; updated_at is handled by
--- trigger. Set session context first so the audit trigger captures actor/channel:
+-- ----------------------------------------------------------------------------
+-- 6. Intended UPSERT pattern (documentation only -- NOT executed here)
+--    The ETL loads a cleansed payload keyed on the business key customer_id.
+--    aadhaar_no is a second UNIQUE key; a conflict on aadhaar_no with a
+--    DIFFERENT customer_id indicates a duplicate identity and must be routed
+--    to the MDM survivorship / stewardship queue rather than silently merged.
 --
---   SET LOCAL mdm.changed_by = 'etl_service_account';
---   SET LOCAL mdm.channel    = 'ETL';
+--    INSERT INTO public.customer_master (
+--        customer_id, first_name, middle_name, last_name, date_of_birth, gender,
+--        email, mobile_no, pan_no, aadhaar_no, credit_score, credit_score_source,
+--        credit_score_as_of, kyc_status, address_line1, address_line2, city,
+--        state, postal_code, country_code, customer_status, source_system)
+--    VALUES (...)
+--    ON CONFLICT (customer_id) DO UPDATE SET
+--        first_name          = EXCLUDED.first_name,
+--        middle_name         = EXCLUDED.middle_name,
+--        last_name           = EXCLUDED.last_name,
+--        date_of_birth       = EXCLUDED.date_of_birth,
+--        gender              = EXCLUDED.gender,
+--        email               = EXCLUDED.email,
+--        mobile_no           = EXCLUDED.mobile_no,
+--        pan_no              = EXCLUDED.pan_no,
+--        aadhaar_no          = EXCLUDED.aadhaar_no,
+--        credit_score        = EXCLUDED.credit_score,
+--        credit_score_source = EXCLUDED.credit_score_source,
+--        credit_score_as_of  = EXCLUDED.credit_score_as_of,
+--        kyc_status          = EXCLUDED.kyc_status,
+--        address_line1       = EXCLUDED.address_line1,
+--        address_line2       = EXCLUDED.address_line2,
+--        city                = EXCLUDED.city,
+--        state               = EXCLUDED.state,
+--        postal_code         = EXCLUDED.postal_code,
+--        country_code        = EXCLUDED.country_code,
+--        customer_status     = EXCLUDED.customer_status,
+--        source_system       = EXCLUDED.source_system,
+--        updated_at          = CURRENT_TIMESTAMP
+--    WHERE public.customer_master.updated_at < EXCLUDED.updated_at;   -- optional last-write-wins guard
 --
---   INSERT INTO public.customer_master
---       (customer_id, first_name, last_name, email_address,
---        primary_contact_number, alternate_contact_number,
---        address_line_1, city, state_province, postal_code, country_code,
---        customer_status, source_system, source_record_id,
---        last_modified_by, last_modified_channel)
---   VALUES (...)
---   ON CONFLICT (customer_id) DO UPDATE
---   SET first_name               = EXCLUDED.first_name,
---       last_name                = EXCLUDED.last_name,
---       email_address            = EXCLUDED.email_address,
---       primary_contact_number   = EXCLUDED.primary_contact_number,
---       -- Survivorship for the alternate number: most-recent-non-null
---       alternate_contact_number = COALESCE(EXCLUDED.alternate_contact_number,
---                                           public.customer_master.alternate_contact_number),
---       address_line_1           = EXCLUDED.address_line_1,
---       city                     = EXCLUDED.city,
---       state_province           = EXCLUDED.state_province,
---       postal_code              = EXCL
+--    id, created_at are never overwritten; updated_at / record_version are
+--    also enforced by trg_customer_master_set_updated_at.
+
+-- ----------------------------------------------------------------------------
+-- 7. Governance note: phased strategy if the table ALREADY exists with rows
+--    (kept for completeness of the migration contract; not executed here)
+--
+--    Step 1: ALTER TABLE public.customer_master ADD COLUMN IF NOT EXISTS aadhaar_no VARCHAR(12);
+--            ALTER TABLE public.customer_master ADD COLUMN IF NOT EXISTS credit_score INT;
+--            ALTER TABLE public.customer_master ADD CONSTRAINT ck_customer_master_credit_score
+--                CHECK (credit_score BETWEEN 300 AND 900);
+--    Step 2: Backfill aadhaar_no from the KYC source system via ETL (no placeholder
+--            values are permitted for a UNIQUE column; Data Governance approval required
+--            for any exception).
+--    Step 3: CREATE UNIQUE INDEX CONCURRENTLY uq_customer_master_aadhaar_no
+--                ON public.customer_master (aadhaar_no);
+--            ALTER TABLE public.customer_master ADD CONSTRAINT uq_customer_master_aadhaar_no
+--                UNIQUE USING INDEX uq_customer_master_aadhaar_no;
+--    Step 4: Validate zero NULLs, then
+--            ALTER TABLE public.customer_master ALTER COLUMN aadhaar_no SET NOT NULL;
+-- ----------------------------------------------------------------------------
+
+-- ----------------------------------------------------------------------------
+-- 8. ROLLBACK SCRIPT  (V001__create_customer_master__rollback.sql)
+--    Executed only by the CI rollback-verification stage or a DBA.
+--    Order matters: trigger -> function -> indexes -> table.
+--
+--    DROP TRIGGER  IF EXISTS trg_customer_master_set_updated_at ON public.customer_master;
+--    DROP FUNCTION IF EXISTS public.fn_customer_master_set_updated_at();
+--    DROP INDEX    IF EXISTS ix_customer_master_email_lower;
+--    DROP INDEX    IF EXISTS ix_customer_master_mobile_no;
+--    DROP INDEX    IF EXISTS ix_customer_master_pan_no;
+--    DROP INDEX    IF EXISTS ix_customer_master_kyc_status;
+--    DROP INDEX    IF EXISTS ix_customer_master_customer_status;
+--    DROP INDEX    IF EXISTS ix_customer_master_credit_score;
+--    DROP INDEX    IF EXISTS ix_customer_master_updated_at;
+--    DROP TABLE    IF EXISTS public.customer_master;
+-- ----------------------------------------------------------------------------

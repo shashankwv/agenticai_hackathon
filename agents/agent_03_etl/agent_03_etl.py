@@ -1,24 +1,23 @@
 import ast
-import os
-import traceback
 import logging
+import os
 from pathlib import Path
+import traceback
+
 import duckdb
 import pandas as pd
+from pydantic import BaseModel, Field
 import requests
 from requests.auth import HTTPBasicAuth
-from pydantic import BaseModel, Field
 
 from core.llm_factory import get_llm
 from core.state import ProjectState
 
-# Absolute path resolution to project root: /workspaces/codespaces-blank/sdlc-multiagent-automation
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Default seed records to ensure DuckDB has data preview immediately on first run
 DEFAULT_SEED_PAYLOADS = [
     {
         "full_name": "Ananya Sharma",
@@ -84,7 +83,7 @@ def fetch_jira_etl_details(issue_key: str) -> str:
 # endregion
 
 
-# region 2. LLM PIPELINE BUILDER
+# region 2. LLM PIPELINE BUILDER & SCHEMAS
 # ============================================================================
 # Section 2: Pydantic Schema & LLM Code Generation
 # ============================================================================
@@ -92,7 +91,7 @@ class ETLPipelineResponse(BaseModel):
     etl_code: str = Field(
         description=(
             "Valid Python script containing transformations using DuckDB/Polars/Pandas. "
-            "It must clean raw payloads, enforce string stripping, calculate risk metrics, "
+            "It must clean raw payloads, enforce strict field matching, calculate risk metrics, "
             "and include `mask_aadhaar(aadhaar_str)`, `transform_batch(raw_records)`, and "
             "`process_and_store_kyc(form_data)` functions. Do NOT include markdown fences (```)."
         )
@@ -100,13 +99,7 @@ class ETLPipelineResponse(BaseModel):
 
 
 def fetch_existing_duckdb_schema(db_filename: str = "staging.duckdb") -> list[tuple[str, str]]:
-    """Returns [(column_name, column_type), ...] for the live
-    `cleansed_staging_data` table, or [] if it doesn't exist yet / the file
-    is unreachable. Mirrors Agent 04's
-    `fetch_existing_customer_master_schema` — the live table is the real
-    source of truth for "what fields already exist", not whatever code
-    string happened to be cached in session state from a previous run
-    (which could be stale, or simply absent in a fresh session)."""
+    """Returns [(column_name, column_type), ...] for the live `cleansed_staging_data` table."""
     db_path = Path(db_filename)
     if not db_path.is_absolute():
         db_path = PROJECT_ROOT / db_filename
@@ -179,12 +172,19 @@ Based on the following Jira task description, write modular Python transformatio
 
 {jira_spec}
 
-STRICT REQUIREMENTS:
+STRICT REQUIREMENTS & GUARDRAILS:
 1. Parse and sanitize raw incoming customer records.
 2. Implement `mask_aadhaar(val)` keeping only the last 4 digits (e.g., 'XXXX-XXXX-1234').
 3. Calculate `risk_index` float/int based on credit score or income metrics.
-4. Provide `transform_batch(raw_records: list[dict]) -> list[dict]` that outputs cleansed dicts.
-5. Provide `process_and_store_kyc(form_data: dict) -> dict` which transforms a single payload and inserts it into DuckDB table `cleansed_staging_data` inside `staging.duckdb` resolved relative to project root (`Path(__file__).resolve().parent / 'staging.duckdb'`), returning {{'status': 'success', 'message': '...'}}.
+4. Provide `transform_batch(raw_records: list[dict]) -> list[dict]` that outputs cleansed dicts:
+   - Map exact aliases like 'aadhaar_number' -> 'aadhaar_no' or 'annual_inc' -> 'annual_income'.
+   - Do NOT perform loose pattern guessing on unknown fields.
+5. Provide `process_and_store_kyc(form_data: dict) -> dict`:
+   - Transform single record (`transform_batch([form_data])[0]`).
+   - Connect to DuckDB database `staging.duckdb` relative to project root (`Path(__file__).resolve().parent / 'staging.duckdb'`).
+   - Dynamically handle schema migration if missing columns exist (`ALTER TABLE cleansed_staging_data ADD COLUMN ...`).
+   - HUMAN-IN-THE-LOOP SAFETY: If an unresolvable schema collision occurs, return `{{'status': 'requires_human_review', 'message': 'Schema mismatch detected. Human approval required.'}}`.
+   - Wrap ALL DuckDB execution in try-except blocks. Return {{'status': 'success', 'message': '...'}} on success or {{'status': 'error', 'message': str(e)}} on failure.
 Return ONLY valid Python code."""
 
     response: ETLPipelineResponse = structured_llm.invoke(prompt)
@@ -221,18 +221,13 @@ def validate_etl_code(code_str: str, sample_payloads: list[dict] = None) -> tupl
     if "transform_batch" not in local_scope or not callable(local_scope["transform_batch"]):
         return False, "Missing Entrypoint", "Missing required function `transform_batch(raw_records)`"
 
-    # Actually call it against the same records it will be executed on for
-    # real, so a data-shape mismatch fails validation instead of crashing
-    # the agent later during the unguarded execution step.
+    if "process_and_store_kyc" not in local_scope or not callable(local_scope["process_and_store_kyc"]):
+        return False, "Missing Entrypoint", "Missing required function `process_and_store_kyc(form_data)`"
+
     try:
         local_scope["transform_batch"](sample_payloads or DEFAULT_SEED_PAYLOADS)
     except Exception as e:
-        return (
-            False,
-            "Transform Execution Error",
-            f"{traceback.format_exc()}\nDetail: transform_batch() raised when called "
-            f"against the actual input records: {e}",
-        )
+        return False, "Transform Execution Error", f"{traceback.format_exc()}\nDetail: transform_batch raised: {e}"
 
     return True, "NONE", ""
 
@@ -285,13 +280,7 @@ def insert_cleansed_records(
         table_exists = "cleansed_staging_data" in tables
 
         if not table_exists and not allow_schema_changes:
-            return {
-                "status": "FAILED",
-                "error": (
-                    "cleansed_staging_data doesn't exist yet. Run Agent 03 "
-                    "once to initialize the schema before live ingestion."
-                ),
-            }
+            return {"status": "FAILED", "error": "cleansed_staging_data doesn't exist yet."}
 
         if not table_exists:
             conn.register("temp_df", df_new)
@@ -304,7 +293,7 @@ def insert_cleansed_records(
                 for col in df_new.columns:
                     if col not in existing_cols:
                         col_type = _duckdb_type_for(df_new[col])
-                        conn.execute(f"ALTER TABLE cleansed_staging_data ADD COLUMN {col} {col_type}")
+                        conn.execute(f'ALTER TABLE cleansed_staging_data ADD COLUMN "{col}" {col_type}')
                         new_columns.append(col)
             else:
                 dropped_columns = [c for c in df_new.columns if c not in existing_cols]
@@ -312,20 +301,14 @@ def insert_cleansed_records(
                     df_new = df_new.drop(columns=dropped_columns)
 
             if df_new.empty or len(df_new.columns) == 0:
-                return {
-                    "status": "FAILED",
-                    "error": "None of the submitted fields match the existing schema.",
-                    "dropped_columns": dropped_columns,
-                }
+                return {"status": "FAILED", "error": "No fields match existing schema."}
 
             # Insert by explicit column name (not positional SELECT *): incoming
             # records may have a different/narrower set of fields than earlier
             # ones, so column counts between df_new and the table can differ.
             conn.register("temp_df", df_new)
             col_list = ", ".join(f'"{c}"' for c in df_new.columns)
-            conn.execute(
-                f"INSERT INTO cleansed_staging_data ({col_list}) SELECT {col_list} FROM temp_df"
-            )
+            conn.execute(f"INSERT INTO cleansed_staging_data ({col_list}) SELECT {col_list} FROM temp_df")
     finally:
         # Always release the connection/file lock, even if a statement above
         # raised — otherwise a single bad record permanently wedges the
@@ -384,19 +367,11 @@ def sync_cleansed_schema(sample_records: list[dict], db_filename: str = "staging
 def run_etl_in_duckdb(
     etl_code: str,
     raw_payloads: list[dict],
-    schema_sample_payloads: list[dict],
+    validation_payloads: list[dict],
     db_filename: str = "staging.duckdb",
 ) -> dict:
-    """Persists a generated `transform_batch` script, always syncs the table's
-    schema against `schema_sample_payloads` (Workflow 1's DDL step — this
-    runs even with zero real records), and, only if `raw_payloads` are real
-    records (not just a validation sample), inserts the transformed results.
-    Called with an empty `raw_payloads` list when there's no real data yet,
-    so re-running Agent 03 with no new real data doesn't duplicate rows on
-    every click, while still keeping the schema current."""
+    """Persists script and runs transformation against DuckDB."""
     etl_script_path = PROJECT_ROOT / "etl_pipeline.py"
-
-    # Persist code to project root for streamlit_app.py imports
     with open(etl_script_path, "w", encoding="utf-8") as f:
         f.write(etl_code)
 
@@ -407,27 +382,21 @@ def run_etl_in_duckdb(
     schema_result = sync_cleansed_schema(transform_fn(schema_sample_payloads), db_filename=db_filename)
 
     if not raw_payloads:
-        return {
-            "status": "SUCCESS",
-            "processed_count": 0,
-            "sample_output": {},
-            "new_columns": schema_result["new_columns"],
-        }
+        return {"status": "SUCCESS", "processed_count": 0, "sample_output": {}}
 
     cleansed_records = transform_fn(raw_payloads)
     return insert_cleansed_records(cleansed_records, db_filename=db_filename)
 # endregion
 
 
-# region 3b. DETERMINISTIC LIVE INGESTION PATH (no LLM call required per-request)
+# region 3b. LIVE INGESTION PATH
 # ============================================================================
 # Used by api_bridge.py's /api/ingest route: cleanses a single record submitted
 # by the UI and stores it into DuckDB, without paying for/depending on an LLM
 # call on every live HTTP request.
 # ============================================================================
 def default_transform_batch(raw_records: list[dict]) -> list[dict]:
-    """Deterministic fallback cleansing: strips strings, masks Aadhaar numbers,
-    and computes a simple risk_index from credit_score/annual_income."""
+    """Deterministic fallback cleansing."""
     cleansed_records = []
     for record in raw_records:
         if not isinstance(record, dict):
@@ -476,7 +445,6 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
     """Agent 03 Orchestrator: Validates, heals, and runs ETL pipeline against DuckDB."""
     logger.info("🤖 [Agent 03] Starting ETL Agent...")
 
-    # Fetch spec from Jira API if issue key exists; otherwise fallback to state/confluence text
     if getattr(state, "jira_etl_issue_key", None):
         logger.info(f"Fetching Jira task details for key: {state.jira_etl_issue_key}")
         jira_spec = fetch_jira_etl_details(state.jira_etl_issue_key)
@@ -487,31 +455,15 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
             or "Generate production KYC cleaning pipeline with Aadhaar masking and risk calculation into cleansed_staging_data."
         )
 
-    # Real payloads to actually write to DuckDB — empty when this run has no
-    # new real data, so a re-run doesn't re-insert stale records.
     real_payloads = raw_payloads or getattr(state, "raw_payloads", None) or []
-    # Validation always exercises transform_batch against a concrete sample so
-    # self-healing catches data-shape bugs even when there's no real data yet
-    # (e.g. the very first run, before any UI submission has occurred).
     validation_payloads = real_payloads or DEFAULT_SEED_PAYLOADS
 
-    # Self-Healing Retry Loop
     max_retries = 3
     etl_code = ""
     healing_context = None
-    # Carry the previously-generated pipeline forward as a baseline to
-    # extend, so re-running Agent 03 for a new Jira story doesn't throw away
-    # everything generated for earlier stories.
     baseline_code = getattr(state, "etl_code", None) or None
-    # Same live-schema introspection Agent 04 uses — the actual DuckDB table
-    # is authoritative regardless of what's (or isn't) cached in session state.
     existing_schema = fetch_existing_duckdb_schema()
-    logger.info(
-        f"Live cleansed_staging_data schema: "
-        f"{'extending ' + str(len(existing_schema)) + ' existing columns' if existing_schema else 'table does not exist yet'}"
-    )
 
-    err_type, err_traceback = "LLM Generation Error", ""
     for attempt in range(1, max_retries + 1):
         logger.info(f"Generating ETL Pipeline (Attempt {attempt}/{max_retries})...")
         try:
@@ -522,12 +474,8 @@ def run_etl_agent(state: ProjectState, raw_payloads: list[dict] = None) -> Proje
                 existing_schema=existing_schema,
             )
         except Exception as e:
-            # A flaky/slow LLM call (timeout, rate limit, malformed response)
-            # should count as a failed healing attempt, not crash the agent.
             logger.warning(f"⚠️ [ETL GENERATION ERROR] Attempt {attempt}/{max_retries}: {e}")
-            healing_context = f"# ERROR CATEGORY: LLM Generation Error\n# DETAIL:\n{e}\n"
-            is_valid = False
-            err_type, err_traceback = "LLM Generation Error", str(e)
+            healing_context = f"LLM Generation Error: {e}"
             continue
 
         is_valid, err_type, err_traceback = validate_etl_code(etl_code, sample_payloads=validation_payloads)

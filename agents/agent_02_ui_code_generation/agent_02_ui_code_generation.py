@@ -12,7 +12,7 @@ from core.llm_factory import get_llm
 from core.state import ProjectState
 
 # Absolute path resolution to project root
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,14 +96,11 @@ def generate_ui_code(jira_spec: str, existing_code: str = None, baseline_code: s
         )
     if baseline_code:
         context_prefix += (
-            "# CURRENT PRODUCTION UI (from a previous Jira story — this is "
-            "LIVE and already working):\n"
+            "# CURRENT PRODUCTION UI (from a previous Jira story — this is LIVE and already working):\n"
             f"{baseline_code}\n\n"
-            "INCREMENTAL UPDATE INSTRUCTIONS: Treat the new Jira task below as a "
-            "DELTA against the UI above. Preserve every existing field, widget, "
-            "and function exactly as-is unless the new task explicitly asks to "
-            "change it — only ADD what the new task actually requires. Do NOT "
-            "invent an unrelated form that drops existing fields/logic.\n\n"
+            "INCREMENTAL UPDATE INSTRUCTIONS: Treat the new Jira task below as a DELTA against the UI above. "
+            "Preserve every existing field, widget, and function exactly as-is unless the new task explicitly asks to change it. "
+            "Only ADD what the new task actually requires.\n\n"
         )
 
     prompt = f"""{context_prefix}You are an expert Frontend Streamlit Engineer.
@@ -111,12 +108,16 @@ Based on the following requirements, write production-ready Python Streamlit cod
 
 {jira_spec}
 
-STRICT REQUIREMENTS:
+STRICT REQUIREMENTS & SELF-HEALING GUARDRAILS:
 1. Wrap all form rendering inside `render_generated_ui()`.
 2. Gather all input fields into a `form_data` dictionary.
 3. Upon clicking 'Submit & Process KYC', dynamically import and invoke `process_and_store_kyc(form_data)` from `etl_pipeline.py`.
-4. Gracefully handle response dict `{{'status': 'success'/'error', 'message': '...'}}` and display appropriate Streamlit alerts (`st.success` / `st.error`).
-5. Do NOT output raw markdown tags or ```python formatting wrappers.
+4. HARDENING RULE: You MUST wrap the invocation of `process_and_store_kyc(form_data)` inside a robust try-except block.
+5. Gracefully process response dict:
+   - If response status is 'success': display `st.success(...)`.
+   - If response status is 'requires_human_review': display `st.warning(...)` informing the user that schema resolution is pending Human-In-The-Loop validation.
+   - If response status is 'error' or an uncaught Exception occurs: display `st.error(...)` showing a clear, friendly error message instead of an unhandled exception traceback.
+6. Do NOT output raw markdown tags or ```python formatting wrappers.
 Return ONLY executable Python code."""
 
     response: UICodeResponse = structured_llm.invoke(prompt)
