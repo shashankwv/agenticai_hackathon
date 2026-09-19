@@ -17,7 +17,7 @@ import streamlit.components.v1 as components
 # ============================================================================
 # CONSOLIDATED AGENT IMPORTS
 # ============================================================================
-from agents.agent_01_requirements import run_requirements_agent
+from agents.agent_01_requirements import run_requirements_agent, split_requirement_into_jira_tasks, fetch_confluence_page, create_jira_issues_parallel
 from agents.agent_02_ui_code_generation import run_ui_code_generation_agent
 from agents.agent_03_etl import run_etl_agent
 from agents.agent_04_mdm import run_mdm_agent_autonomous, ensure_postgres_running
@@ -614,8 +614,40 @@ if "execution_logs" not in st.session_state:
 if "has_initialized" not in st.session_state:
     st.session_state.has_initialized = False
 
+if "pending_hitl_breakdown" not in st.session_state:
+    st.session_state.pending_hitl_breakdown = None
+
+if "hitl_approved" not in st.session_state:
+    st.session_state.hitl_approved = None
+
 state = st.session_state.project_state
 terminal_placeholder = None
+
+
+# --- HUMAN IN LOOP DIALOG ---
+@st.dialog("📋 Review & Approve Jira Tickets")
+def show_hitl_ticket_preview(breakdown):
+    st.markdown("**UI Task Ticket**")
+    st.caption(breakdown.ui_task_description)
+
+    st.markdown("**ETL Task Ticket**")
+    st.caption(breakdown.etl_task_description)
+
+    st.markdown("**MDM Task Ticket**")
+    st.caption(breakdown.mdm_task_description)
+
+    st.markdown("---")
+    col_ok, col_not_ok = st.columns(2)
+
+    with col_ok:
+        if st.button("✅ Ok", use_container_width=True, type="primary"):
+            st.session_state.hitl_approved = True
+            st.rerun()
+
+    with col_not_ok:
+        if st.button("❌ Not Ok", use_container_width=True):
+            st.session_state.hitl_approved = False
+            st.rerun()
 
 
 def render_terminal_component():
@@ -785,6 +817,12 @@ with st.sidebar:
     reset_clicked = st.button("🧹 Reset State", use_container_width=True)
 
     st.markdown("<div style='margin: 0.15rem 0;'></div>", unsafe_allow_html=True)
+    human_in_loop = st.toggle(
+        "👤 Human-in-Loop Approval",
+        value=False,
+        key="sb_hitl",
+        help="When enabled, requires human confirmation before creating Jira tickets in Agent 01.",
+    )
     execute_live = st.toggle(
         "Execute Live DB",
         value=True,
@@ -898,6 +936,24 @@ with col_terminal:
     update_terminal_ui()
 
 
+# --- HANDLE RESUMED HITL FLOW ---
+if st.session_state.pending_hitl_breakdown is not None:
+    if st.session_state.hitl_approved is None:
+        show_hitl_ticket_preview(st.session_state.pending_hitl_breakdown)
+    elif st.session_state.hitl_approved is True:
+        add_log("[Human-in-Loop]: Approved! Creating tickets on Jira...", "SUCCESS")
+        create_jira_issues_parallel(state, project_key=project_key_input)
+        st.session_state.pending_hitl_breakdown = None
+        st.session_state.hitl_approved = None
+        add_log("Agent 01 Jira tickets created successfully.", "SUCCESS")
+        st.rerun()
+    elif st.session_state.hitl_approved is False:
+        add_log("[Human-in-Loop]: Rejected ticket creation.", "WARN")
+        st.session_state.pending_hitl_breakdown = None
+        st.session_state.hitl_approved = None
+        st.rerun()
+
+
 # --- SIDEBAR & AGENT EXECUTION HANDLERS ---
 if run_pipeline_clicked:
     pipeline_start_time = time.perf_counter()
@@ -910,9 +966,22 @@ if run_pipeline_clicked:
     add_log("[1/4] Executing Agent 01 (Requirements Parsing)...", "EXEC")
     add_log("[PROCESSING...] Parsing requirements...", "WARN")
     t_start = time.perf_counter()
-    state = run_requirements_agent(
-        state, page_id=page_id_input, project_key=project_key_input
-    )
+
+    if human_in_loop:
+        confluence_content = fetch_confluence_page(page_id_input)
+        state.raw_confluence_doc = confluence_content
+        breakdown = split_requirement_into_jira_tasks(confluence_content)
+        state.jira_ui_task = breakdown.ui_task_description
+        state.jira_etl_task = breakdown.etl_task_description
+        state.jira_mdm_task = breakdown.mdm_task_description
+        st.session_state.pending_hitl_breakdown = breakdown
+        add_log("[Human-in-Loop]: Awaiting user approval on ticket creation...", "WARN")
+        st.rerun()
+    else:
+        state = run_requirements_agent(
+            state, page_id=page_id_input, project_key=project_key_input, human_in_loop=False
+        )
+
     elapsed_a1 = time.perf_counter() - t_start
     if (
         st.session_state.execution_logs
@@ -984,6 +1053,8 @@ if reset_clicked:
     st.session_state.project_state = ProjectState()
     st.session_state.execution_logs = []
     st.session_state.has_initialized = True
+    st.session_state.pending_hitl_breakdown = None
+    st.session_state.hitl_approved = None
     add_log("System state and memory reset.")
     st.toast("✨ System Reset Complete!")
     st.rerun()
@@ -995,9 +1066,22 @@ if run_phase_1:
     add_log("Agent 01 Triggered: Requirements Parsing...", "EXEC")
     add_log("[PROCESSING...] Parsing requirements...", "WARN")
     start_time = time.perf_counter()
-    state = run_requirements_agent(
-        state, page_id=page_id_input, project_key=project_key_input
-    )
+
+    if human_in_loop:
+        confluence_content = fetch_confluence_page(page_id_input)
+        state.raw_confluence_doc = confluence_content
+        breakdown = split_requirement_into_jira_tasks(confluence_content)
+        state.jira_ui_task = breakdown.ui_task_description
+        state.jira_etl_task = breakdown.etl_task_description
+        state.jira_mdm_task = breakdown.mdm_task_description
+        st.session_state.pending_hitl_breakdown = breakdown
+        add_log("[Human-in-Loop]: Awaiting user approval on ticket creation...", "WARN")
+        st.rerun()
+    else:
+        state = run_requirements_agent(
+            state, page_id=page_id_input, project_key=project_key_input, human_in_loop=False
+        )
+
     st.session_state.project_state = state
     elapsed = time.perf_counter() - start_time
     if (

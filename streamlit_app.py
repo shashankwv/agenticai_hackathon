@@ -4,10 +4,12 @@ import streamlit as st
 import requests
 
 API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"
+BUREAU_API_URL = "http://127.0.0.1:8000/api/bureau/score"
 
+# Strict validation patterns
 AADHAAR_REGEX = re.compile(r"^\d{12}$")
 PAN_REGEX = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]{1}$")
-MOBILE_REGEX = re.compile(r"^[6-9]\d{9}$")
+PHONE_REGEX = re.compile(r"^[6-9]\d{9}$")
 
 
 def submit_to_pipeline(form_data: dict) -> dict:
@@ -18,161 +20,224 @@ def submit_to_pipeline(form_data: dict) -> dict:
         return {"status": "error", "message": f"Ingestion server offline (Port 8000). Please start api_bridge.py: {e}"}
 
 
+# ---------------------------------------------------------------------------
+# Pure helpers (importable for unit tests)
+# ---------------------------------------------------------------------------
 def normalize_aadhaar(raw: str) -> str:
-    # Strip spaces / hyphens commonly typed between digit groups (e.g. 1234 5678 9012)
+    """Strip spaces/hyphens commonly typed in Aadhaar numbers (e.g. '1234 5678 9012')."""
     return re.sub(r"[\s-]", "", raw or "")
 
 
 def normalize_pan(raw: str) -> str:
-    return re.sub(r"\s", "", (raw or "")).upper()
+    """Remove whitespace and force uppercase for PAN."""
+    return re.sub(r"\s", "", raw or "").upper()
 
 
-def is_valid_aadhaar(value: str) -> bool:
-    return bool(AADHAAR_REGEX.match(value))
+def validate_aadhaar(value: str) -> str:
+    """Return '' when valid, otherwise a human-readable error message."""
+    if not value:
+        return "Aadhaar Number is required."
+    if not AADHAAR_REGEX.match(value):
+        if not value.isdigit():
+            return "Aadhaar must contain numeric digits only (0-9)."
+        return f"Aadhaar must be exactly 12 digits (you entered {len(value)})."
+    return ""
 
 
-def is_valid_pan(value: str) -> bool:
-    return bool(PAN_REGEX.match(value))
+def validate_pan(value: str) -> str:
+    if not value:
+        return "PAN is required."
+    if not PAN_REGEX.match(value):
+        return "PAN must match the format AAAAA9999A (5 letters, 4 digits, 1 letter)."
+    return ""
 
 
-def fetch_bureau_score(pan: str):
-    """Simulates a credit bureau lookup. Returns int in 300-900 or None (pending / unavailable)."""
-    if not is_valid_pan(pan):
+def format_aadhaar(value: str) -> str:
+    """Render a valid Aadhaar as 'XXXX XXXX XXXX'."""
+    if AADHAAR_REGEX.match(value or ""):
+        return " ".join(value[i:i + 4] for i in range(0, 12, 4))
+    return value or ""
+
+
+def mask_aadhaar(value: str) -> str:
+    if AADHAAR_REGEX.match(value or ""):
+        return f"XXXX XXXX {value[-4:]}"
+    return value or ""
+
+
+def extract_credit_score(response: dict):
+    """Pull credit score from ingest/bureau response in a tolerant way."""
+    if not isinstance(response, dict):
         return None
-    # Deterministic mock score derived from PAN so the UI is repeatable.
-    seed = sum(ord(c) for c in pan)
-    return 300 + (seed * 37) % 601
+    for key in ("credit_score", "calculated_credit_score", "score"):
+        if response.get(key) is not None:
+            return response.get(key)
+    nested = response.get("data") or response.get("bureau") or {}
+    if isinstance(nested, dict):
+        for key in ("credit_score", "calculated_credit_score", "score"):
+            if nested.get(key) is not None:
+                return nested.get(key)
+    return None
 
 
-st.set_page_config(page_title="Customer 360 - KYC Registration", layout="centered")
-st.title("Customer 360 - KYC Registration")
-st.caption("Extended KYC form with Aadhaar validation and bureau credit score display.")
+def fetch_credit_score(pan: str, aadhaar: str):
+    """Query bureau API for the calculated credit score. Returns int or None."""
+    try:
+        resp = requests.get(BUREAU_API_URL, params={"pan": pan, "aadhaar": aadhaar}, timeout=10)
+        return extract_credit_score(resp.json())
+    except Exception:
+        return None
 
-if "credit_score" not in st.session_state:
-    st.session_state.credit_score = None
-if "credit_score_state" not in st.session_state:
-    st.session_state.credit_score_state = "pending"  # pending | available | unavailable
 
-# ---------------------------------------------------------------
-# Bureau lookup (outside the form: st.button is not permitted in st.form)
-# ---------------------------------------------------------------
-with st.expander("Credit Bureau Lookup", expanded=True):
-    lookup_pan = normalize_pan(st.text_input("PAN for bureau lookup", max_chars=10, placeholder="ABCDE1234F", key="lookup_pan"))
-    if lookup_pan and not is_valid_pan(lookup_pan):
-        st.error("PAN must match format AAAAA9999A (5 letters, 4 digits, 1 letter).")
-    if st.button("Fetch Credit Score from Bureau"):
-        score = fetch_bureau_score(lookup_pan)
+def render_credit_score(container, score):
+    """Read-only display element for 'Calculated Credit Score'."""
+    with container.container():
+        st.subheader("Calculated Credit Score")
+        display_value = "" if score is None else str(score)
+        st.text_input(
+            "Calculated Credit Score",
+            value=display_value,
+            disabled=True,
+            key=f"credit_score_display_{display_value}",
+            help="Read-only. Populated from the bureau API response after submission.",
+        )
         if score is None:
-            st.session_state.credit_score = None
-            st.session_state.credit_score_state = "unavailable"
+            st.caption("Not yet calculated. Submit the KYC form to fetch the score from the bureau.")
         else:
-            st.session_state.credit_score = score
-            st.session_state.credit_score_state = "available"
+            try:
+                numeric = int(score)
+                band = "Excellent" if numeric >= 750 else "Good" if numeric >= 700 else "Fair" if numeric >= 650 else "Poor"
+                st.metric(label="Bureau Score", value=numeric, delta=band, delta_color="off")
+            except (TypeError, ValueError):
+                st.metric(label="Bureau Score", value=str(score))
 
-# ---------------------------------------------------------------
-# KYC Form
-# ---------------------------------------------------------------
-with st.form("kyc_form"):
-    st.subheader("Customer Details")
-    full_name = st.text_input("Full Name", max_chars=100)
-    dob = st.date_input("Date of Birth")
-    mobile = st.text_input("Mobile Number", max_chars=10, placeholder="9876543210")
-    email = st.text_input("Email")
-    address = st.text_area("Address", height=80)
 
-    st.subheader("Identity Documents")
-    pan_raw = st.text_input("PAN Number", max_chars=10, placeholder="ABCDE1234F")
-    pan_error = st.empty()
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="Customer KYC Registration", page_icon="🪪", layout="centered")
+    st.title("Customer KYC Registration")
+    st.caption("All fields are validated client-side before being sent to the ingestion pipeline.")
 
-    aadhaar_raw = st.text_input(
-        "Aadhaar Number",
-        max_chars=14,
-        placeholder="123456789012",
-        help="Exactly 12 numeric digits. Spaces or hyphens are removed automatically.",
-    )
-    aadhaar_error = st.empty()
+    if "credit_score" not in st.session_state:
+        st.session_state.credit_score = None
+    if "last_response" not in st.session_state:
+        st.session_state.last_response = None
 
-    st.subheader("Calculated Credit Score (read-only)")
-    cs_state = st.session_state.credit_score_state
-    cs_value = st.session_state.credit_score
-    if cs_state == "available" and cs_value is not None:
-        cs_display = str(cs_value)
-        cs_help = "Populated from bureau response (range 300-900). Not editable."
-    elif cs_state == "unavailable":
-        cs_display = "N/A - bureau returned no score"
-        cs_help = "Bureau lookup did not return a score for the provided PAN."
-    else:
-        cs_display = "Pending - awaiting bureau response"
-        cs_help = "Run the bureau lookup above to populate this field."
-    st.text_input("Calculated Credit Score", value=cs_display, disabled=True, help=cs_help)
-    if cs_state == "available" and cs_value is not None:
-        st.progress((cs_value - 300) / 600.0, text=f"Score band: {cs_value} / 900")
+    # Placeholder so the read-only score can be refreshed in the same run after submit
+    score_placeholder = st.empty()
+    render_credit_score(score_placeholder, st.session_state.credit_score)
 
-    submitted = st.form_submit_button("Submit KYC")
+    st.divider()
 
-# ---------------------------------------------------------------
-# Validation & Submission
-# ---------------------------------------------------------------
-if submitted:
-    errors = []
-    aadhaar = normalize_aadhaar(aadhaar_raw)
-    pan = normalize_pan(pan_raw)
+    with st.form("kyc_form", clear_on_submit=False):
+        st.subheader("Customer Details")
+        col1, col2 = st.columns(2)
+        with col1:
+            full_name = st.text_input("Full Name *", max_chars=100, placeholder="As per Aadhaar")
+            dob = st.date_input("Date of Birth *", value=None, format="DD/MM/YYYY")
+            phone_raw = st.text_input("Mobile Number *", max_chars=10, placeholder="10-digit mobile")
+        with col2:
+            email = st.text_input("Email", placeholder="name@example.com")
+            pan_raw = st.text_input("PAN *", max_chars=10, placeholder="ABCDE1234F", help="Format: AAAAA9999A")
+            aadhaar_raw = st.text_input(
+                "Aadhaar Number *",
+                max_chars=14,
+                placeholder="12-digit numeric Aadhaar",
+                help="Exactly 12 numeric digits (spaces/hyphens are ignored).",
+            )
+        address = st.text_area("Residential Address *", max_chars=300)
+        consent = st.checkbox("I consent to Aadhaar/PAN verification and credit bureau inquiry *")
 
-    if not is_valid_aadhaar(aadhaar):
-        aadhaar_error.error("Invalid Aadhaar: must be exactly 12 numeric digits (regex ^\\d{12}$).")
-        errors.append("aadhaar")
-    else:
-        aadhaar_error.empty()
+        submitted = st.form_submit_button("Submit KYC", type="primary", use_container_width=True)
 
-    if not is_valid_pan(pan):
-        pan_error.error("Invalid PAN: expected format AAAAA9999A.")
-        errors.append("pan")
-    else:
-        pan_error.empty()
+    if submitted:
+        aadhaar = normalize_aadhaar(aadhaar_raw)
+        pan = normalize_pan(pan_raw)
+        phone = re.sub(r"\D", "", phone_raw or "")
 
-    if not full_name.strip():
-        st.error("Full Name is required.")
-        errors.append("full_name")
+        errors = []
 
-    if mobile and not MOBILE_REGEX.match(mobile):
-        st.error("Mobile Number must be 10 digits starting with 6-9.")
-        errors.append("mobile")
+        if not (full_name or "").strip():
+            errors.append("Full Name is required.")
+        if dob is None:
+            errors.append("Date of Birth is required.")
+        if not PHONE_REGEX.match(phone):
+            errors.append("Mobile Number must be a valid 10-digit Indian mobile number.")
+        if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            errors.append("Email address is not valid.")
 
-    if errors:
-        st.error("Submission blocked. Please fix the highlighted fields.")
-    else:
-        form_data = {
-            "form_type": "kyc_registration",
-            "full_name": full_name.strip(),
-            "dob": dob.isoformat() if dob else None,
-            "mobile": mobile,
-            "email": email.strip(),
-            "address": address.strip(),
-            "pan": pan,
-            "aadhaar": aadhaar,
-            "aadhaar_masked": "XXXX-XXXX-" + aadhaar[-4:],
-            "credit_score": st.session_state.credit_score,
-            "credit_score_state": st.session_state.credit_score_state,
-        }
+        pan_error = validate_pan(pan)
+        if pan_error:
+            errors.append(f"PAN: {pan_error}")
 
-        with st.spinner("Submitting to ingestion pipeline..."):
-            result = submit_to_pipeline(form_data)
+        # Strict Aadhaar validation: ^\d{12}$ — inline error + block submission
+        aadhaar_error = validate_aadhaar(aadhaar)
+        if aadhaar_error:
+            errors.append(f"Aadhaar Number: {aadhaar_error}")
 
-        status = (result or {}).get("status", "error")
-        message = (result or {}).get("message", "")
+        if not (address or "").strip():
+            errors.append("Residential Address is required.")
+        if not consent:
+            errors.append("Consent is required to proceed.")
 
-        if status == "success":
-            st.success(f"KYC submitted successfully. {message}")
-        elif status == "requires_pipeline":
-            st.info(f"Submission accepted and queued for downstream pipeline processing. {message}")
-        elif status == "requires_human_review":
-            st.warning(f"Submission flagged for human review. {message}")
+        if errors:
+            st.error("Submission blocked. Please fix the following:")
+            for err in errors:
+                st.markdown(f"- ❌ {err}")
         else:
-            st.error(f"Submission failed: {message or 'Unknown error'}")
+            form_data = {
+                "form_type": "customer_kyc",
+                "full_name": full_name.strip(),
+                "dob": dob.isoformat(),
+                "phone": phone,
+                "email": (email or "").strip(),
+                "pan": pan,
+                "aadhaar": aadhaar,
+                "aadhaar_formatted": format_aadhaar(aadhaar),
+                "address": address.strip(),
+                "consent": bool(consent),
+            }
 
-        with st.expander("Payload sent"):
-            safe_payload = dict(form_data)
-            safe_payload["aadhaar"] = safe_payload["aadhaar_masked"]
-            st.code(json.dumps(safe_payload, indent=2), language="json")
-        with st.expander("Raw pipeline response"):
-            st.code(json.dumps(result, indent=2, default=str), language="json")
+            with st.spinner("Submitting to ingestion pipeline..."):
+                response = submit_to_pipeline(form_data)
+
+            if not isinstance(response, dict):
+                response = {"status": "error", "message": "Unexpected response from ingestion server."}
+
+            status = str(response.get("status", "")).lower()
+            message = response.get("message", "")
+
+            # Populate read-only credit score from bureau response
+            credit_score = extract_credit_score(response)
+            if credit_score is None and status != "error":
+                with st.spinner("Fetching credit score from bureau..."):
+                    credit_score = fetch_credit_score(pan, aadhaar)
+            if credit_score is not None:
+                st.session_state.credit_score = credit_score
+                render_credit_score(score_placeholder, credit_score)
+
+            st.session_state.last_response = response
+
+            if status == "success":
+                st.success(f"KYC submitted successfully for {form_data['full_name']} (Aadhaar {mask_aadhaar(aadhaar)}). {message}".strip())
+            elif status == "requires_pipeline":
+                st.info(f"Submission accepted and queued for downstream pipeline processing. {message}".strip())
+            elif status == "requires_human_review":
+                st.warning(f"Submission flagged for human review. {message}".strip())
+            elif status == "error":
+                st.error(message or "An error occurred while submitting the KYC form.")
+            else:
+                st.info(f"Response received with status '{status or 'unknown'}'. {message}".strip())
+
+            with st.expander("Submission payload & server response"):
+                safe_payload = dict(form_data)
+                safe_payload["aadhaar"] = mask_aadhaar(aadhaar)
+                safe_payload["aadhaar_formatted"] = mask_aadhaar(aadhaar)
+                st.code(json.dumps(safe_payload, indent=2), language="json")
+                st.code(json.dumps(response, indent=2, default=str), language="json")
+
+
+if __name__ == "__main__":
+    main()

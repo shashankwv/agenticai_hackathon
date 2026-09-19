@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import re
+from typing import Callable, Optional
 from pydantic import BaseModel, Field
 import requests
 from requests.auth import HTTPBasicAuth
@@ -138,8 +139,14 @@ def create_jira_issues_parallel(state: ProjectState, project_key: str = "CBC3") 
 # Step 4: Requirements Agent Execution Entrypoint
 # ==========================================
 
-def run_requirements_agent(state: ProjectState, page_id: str = None, project_key: str = "KAN") -> ProjectState:
-    """Agent 01: Fetches requirements, splits into tasks, and creates live Jira tickets."""
+def run_requirements_agent(
+    state: ProjectState,
+    page_id: str = "1966082",
+    project_key: str = "CBC3",
+    human_in_loop: bool = False,
+    approval_callback: Optional[Callable[[JiraTaskBreakdown], bool]] = None
+) -> ProjectState:
+    """Agent 01: Fetches requirements, splits into tasks, and creates live Jira tickets with optional human approval."""
     confluence_content = fetch_confluence_page(page_id)
     state.raw_confluence_doc = confluence_content
 
@@ -147,6 +154,13 @@ def run_requirements_agent(state: ProjectState, page_id: str = None, project_key
     state.jira_ui_task = jira_breakdown.ui_task_description
     state.jira_etl_task = jira_breakdown.etl_task_description
     state.jira_mdm_task = jira_breakdown.mdm_task_description
+
+    # Human-in-the-Loop Checkpoint
+    if human_in_loop and approval_callback is not None:
+        approved = approval_callback(jira_breakdown)
+        if not approved:
+            print("[Human-in-Loop]: Ticket creation rejected by user.")
+            return state
 
     state = create_jira_issues_parallel(state, project_key=project_key)
 

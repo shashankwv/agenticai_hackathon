@@ -4,93 +4,89 @@ import duckdb
 import pandas as pd
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "etl.duckdb"
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "etl.duckdb"
+CONFIG_PATH = BASE_DIR / "risk_config.json"
+DEFAULT_CONFIG = {"income_weight": 0.4, "credit_weight": 0.6, "income_cap": 200000.0, "credit_min": 300, "credit_max": 900, "scale": 100}
 AADHAAR_RE = re.compile(r"^\d{12}$")
-STAGING_COLS = ["id", "aadhaar_masked", "monthly_income", "credit_history", "credit_score", "risk_index", "status"]
+STAGING_COLS = ["id", "aadhaar_no", "aadhaar_masked", "monthly_income", "credit_history", "credit_score", "risk_index", "status", "reject_reason"]
+
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        return {**DEFAULT_CONFIG, **json.loads(CONFIG_PATH.read_text())}
+    return dict(DEFAULT_CONFIG)
 
 
 def mask_sensitive_value(val: str, keep_last: int = 4) -> str:
-    s = "" if val is None else str(val)
-    if not s:
-        return ""
-    tail = s[-keep_last:] if keep_last > 0 else ""
-    hidden = "X" * max(len(s) - len(tail), 0)
-    full = hidden + tail
-    groups = [full[i:i + 4] for i in range(0, len(full), 4)]
-    return "-".join(groups)
+    digits = re.sub(r"\D", "", str(val or ""))
+    tail = digits[-keep_last:] if keep_last > 0 else ""
+    return f"XXXX-XXXX-{tail.rjust(max(keep_last, 0), 'X')}"
 
 
-def sanitize_aadhaar(raw) -> str | None:
-    if raw is None:
-        return None
-    cleaned = re.sub(r"[\s\-]", "", str(raw))
+def sanitize_aadhaar(val) -> str | None:
+    cleaned = re.sub(r"\D", "", str(val if val is not None else "").strip())
     return cleaned if AADHAAR_RE.match(cleaned) else None
 
 
-def compute_risk_index(monthly_income, credit_history) -> int:
+def _to_float(val) -> float | None:
     try:
-        income = float(monthly_income or 0)
+        return float(val) if val not in (None, "") else None
     except (TypeError, ValueError):
-        income = 0.0
-    score = 50
-    if income >= 100000:
-        score -= 20
-    elif income >= 50000:
-        score -= 10
-    elif income < 20000:
-        score += 15
-    history = str(credit_history or "none").strip().lower()
-    score += {"excellent": -25, "good": -15, "fair": 0, "poor": 25, "none": 10}.get(history, 10)
-    return max(0, min(100, score))
+        return None
 
 
-def transform_batch(raw_records: list[dict]) -> list[dict]:
+def compute_risk_index(monthly_income, credit_history, config: dict) -> float:
+    income_norm = min(max(float(monthly_income or 0.0), 0.0), config["income_cap"]) / config["income_cap"]
+    span = float(config["credit_max"] - config["credit_min"])
+    credit_val = min(max(float(credit_history if credit_history is not None else config["credit_min"]), config["credit_min"]), config["credit_max"])
+    credit_norm = (credit_val - config["credit_min"]) / span
+    risk = 1.0 - (config["income_weight"] * income_norm + config["credit_weight"] * credit_norm)
+    return round(max(0.0, min(1.0, risk)) * config["scale"], 2)
+
+
+def risk_to_credit_score(risk_index: float, config: dict) -> int:
+    span = config["credit_max"] - config["credit_min"]
+    return int(round(config["credit_max"] - (risk_index / config["scale"]) * span))
+
+
+def transform_batch(raw_records: list[dict], config: dict | None = None) -> list[dict]:
+    config = config or load_config()
     out = []
     for rec in raw_records:
-        payload = rec.get("payload") or {}
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                payload = {}
+        payload = rec.get("payload", rec)
+        payload = json.loads(payload) if isinstance(payload, str) else (payload or {})
         aadhaar = sanitize_aadhaar(payload.get("aadhaar_no"))
-        income = payload.get("monthly_income")
-        history = payload.get("credit_history")
-        try:
-            credit_score = int(payload.get("credit_score")) if payload.get("credit_score") is not None else None
-        except (TypeError, ValueError):
-            credit_score = None
-        row = {
-            "id": str(rec.get("id") or payload.get("id") or ""),
-            "aadhaar_masked": mask_sensitive_value(aadhaar) if aadhaar else None,
-            "monthly_income": float(income) if isinstance(income, (int, float)) else None,
-            "credit_history": str(history) if history is not None else None,
-            "credit_score": credit_score,
-            "risk_index": compute_risk_index(income, history),
-            "status": "ok" if aadhaar else "quarantined",
-        }
+        row = {"id": str(rec.get("id") or payload.get("id") or ""), "aadhaar_no": aadhaar, "aadhaar_masked": mask_sensitive_value(payload.get("aadhaar_no")),
+               "monthly_income": _to_float(payload.get("monthly_income")), "credit_history": _to_float(payload.get("credit_history"))}
+        if aadhaar is None:
+            row.update({"credit_score": None, "risk_index": None, "status": "rejected", "reject_reason": "invalid_aadhaar"})
+        else:
+            risk = compute_risk_index(row["monthly_income"], row["credit_history"], config)
+            row.update({"credit_score": risk_to_credit_score(risk, config), "risk_index": risk, "status": "valid", "reject_reason": None})
         out.append(row)
     return out
 
 
-def run_pipeline():
+def run_pipeline() -> None:
     con = duckdb.connect(str(DB_PATH))
     con.execute("CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR, ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);")
-    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR, aadhaar_masked VARCHAR, monthly_income DOUBLE, credit_history VARCHAR, credit_score INTEGER, risk_index INTEGER, status VARCHAR, processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    raw_df = con.execute("SELECT id, CAST(payload AS VARCHAR) AS payload FROM landing_ui ORDER BY ingested_at").df()
-    raw_records = raw_df.to_dict(orient="records")
-    transformed = transform_batch(raw_records)
-    staged_df = pd.DataFrame(transformed, columns=STAGING_COLS)
-    if not staged_df.empty:
-        con.register("staged_df", staged_df)
-        con.execute("INSERT INTO staging_ui (id, aadhaar_masked, monthly_income, credit_history, credit_score, risk_index, status) SELECT id, aadhaar_masked, monthly_income, credit_history, credit_score, risk_index, status FROM staged_df")
-        con.unregister("staged_df")
-    total = len(transformed)
-    quarantined = sum(1 for r in transformed if r["status"] == "quarantined")
-    print(f"landing_ui rows read: {total}")
-    print(f"staging_ui rows loaded: {total} (ok={total - quarantined}, quarantined={quarantined})")
-    for r in transformed[:5]:
-        print(f"id={r['id']} aadhaar={r['aadhaar_masked']} credit_score={r['credit_score']} risk_index={r['risk_index']} status={r['status']}")
+    schema = "(id VARCHAR, aadhaar_no VARCHAR, aadhaar_masked VARCHAR, monthly_income DOUBLE, credit_history DOUBLE, credit_score INTEGER, risk_index DOUBLE, status VARCHAR, reject_reason VARCHAR)"
+    con.execute(f"CREATE TABLE IF NOT EXISTS staging_ui {schema};")
+    con.execute(f"CREATE TABLE IF NOT EXISTS quarantine_ui {schema};")
+    raw = [{"id": r[0], "payload": r[1]} for r in con.execute("SELECT id, payload FROM landing_ui").fetchall()]
+    rows = transform_batch(raw)
+    df = pd.DataFrame(rows, columns=STAGING_COLS)
+    valid = df[df["status"] == "valid"]
+    rejected = df[df["status"] != "valid"]
+    placeholders = ", ".join(["?"] * len(STAGING_COLS))
+    if not valid.empty:
+        con.executemany(f"INSERT INTO staging_ui VALUES ({placeholders})", valid.astype(object).where(valid.notna(), None).values.tolist())
+    if not rejected.empty:
+        con.executemany(f"INSERT INTO quarantine_ui VALUES ({placeholders})", rejected.astype(object).where(rejected.notna(), None).values.tolist())
+    for _, r in rejected.iterrows():
+        print(f"[QUARANTINE] id={r['id']} aadhaar={r['aadhaar_masked']} reason={r['reject_reason']}")
+    print(f"landing={len(raw)} staged={len(valid)} quarantined={len(rejected)} db={DB_PATH.name}")
     con.close()
 
 

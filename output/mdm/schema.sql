@@ -1,267 +1,257 @@
--- ============================================================================
--- MDM: Core Banking Customer 360 -- Master Schema Governance
--- Object      : public.customer_master
--- Script      : V001__create_customer_master.sql  (forward migration)
--- Rollback    : V001__create_customer_master__rollback.sql (see block at end)
--- Owner       : MDM Platform / DBA / Data Governance
--- Notes       : The table does NOT exist yet, therefore aadhaar_no and
---               credit_score are created inline with their full constraints.
---               No phased add-nullable -> backfill -> enforce NOT NULL step is
---               required because there are no pre-existing rows to violate
---               NOT NULL / UNIQUE. If this script is ever re-pointed at an
---               environment where the table already exists, use the phased
---               ALTER TABLE strategy documented in the rollback/notes block.
--- ============================================================================
+-- =====================================================================
+-- MDM Master Table: public.customer_master
+-- Purpose : Golden record for customer KYC data with risk scoring.
+-- Target  : PostgreSQL 13+ (gen_random_uuid() is built-in from PG13;
+--           on older versions run: CREATE EXTENSION IF NOT EXISTS pgcrypto;)
+-- Notes   : Sample payload was not supplied, so the column set below is
+--           derived from standard KYC / AML master-data requirements.
+--           Script is idempotent and contains schema definitions only.
+-- =====================================================================
 
--- gen_random_uuid() is core in PostgreSQL 13+. pgcrypto keeps the script
--- portable to PostgreSQL 10-12 without changing the DDL below.
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
--- ----------------------------------------------------------------------------
--- 1. Golden record table
--- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.customer_master (
-    -- Standard MDM audit / surrogate key columns (first creation only)
-    id                  UUID         DEFAULT gen_random_uuid() PRIMARY KEY,
-    created_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
-    updated_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
 
-    -- Business / natural key: Customer Information File (CIF) number issued by
-    -- the core banking system. Kept separate from the surrogate UUID so that
-    -- ETL UPSERTs can target a stable business identifier.
-    customer_id         VARCHAR(20)  NOT NULL,
+    -- ------------------------------------------------------------------
+    -- Surrogate key (MDM standard). UUID avoids cross-system collisions
+    -- and lets golden records be minted independently of source systems.
+    -- ------------------------------------------------------------------
+    id                          UUID            DEFAULT gen_random_uuid() PRIMARY KEY,
 
-    -- Identity attributes
-    first_name          VARCHAR(100) NOT NULL,
-    middle_name         VARCHAR(100),
-    last_name           VARCHAR(100) NOT NULL,
-    date_of_birth       DATE,
-    gender              VARCHAR(10),
+    -- ------------------------------------------------------------------
+    -- Business / natural key. This is the stable identifier exposed to
+    -- downstream consumers and the conflict target for UPSERTs.
+    -- ------------------------------------------------------------------
+    customer_number             VARCHAR(50)     NOT NULL,
 
-    -- Contact attributes (PII - restricted)
-    email               VARCHAR(255),
-    mobile_no           VARCHAR(15),
+    -- Lineage: which source system produced the record and its local id.
+    -- Composite uniqueness prevents the same source row loading twice.
+    source_system               VARCHAR(50)     NOT NULL,
+    source_record_id            VARCHAR(100)    NOT NULL,
 
-    -- Regulatory identifiers (PII - sensitive)
-    pan_no              VARCHAR(10),
+    -- ------------------------------------------------------------------
+    -- Party identification
+    -- ------------------------------------------------------------------
+    customer_type               VARCHAR(20)     NOT NULL DEFAULT 'INDIVIDUAL',
+    first_name                  VARCHAR(100),
+    middle_name                 VARCHAR(100),
+    last_name                   VARCHAR(100),
+    legal_entity_name           VARCHAR(255),   -- populated for BUSINESS customers
+    date_of_birth               DATE,
+    gender                      VARCHAR(20),
+    nationality_code            CHAR(2),        -- ISO 3166-1 alpha-2
+    country_of_residence_code   CHAR(2),        -- ISO 3166-1 alpha-2
 
-    -- Aadhaar number for Aadhaar-based KYC.
-    -- Spec: VARCHAR(12) NOT NULL UNIQUE. Classified SENSITIVE PII:
-    --   * encryption-at-rest mandatory (tablespace/TDE or column-level pgcrypto
-    --     handled by the platform; DDL keeps clear VARCHAR(12) per contract),
-    --   * access restricted to KYC role; masked in all non-production copies.
-    -- The UNIQUE constraint implicitly creates a B-tree index that also
-    -- serves the ETL UPSERT / de-duplication lookups.
-    aadhaar_no          VARCHAR(12)  NOT NULL,
+    -- Sensitive identifiers are stored as salted hashes, never plaintext.
+    -- Raw values remain in the vault/tokenisation service.
+    tax_id_hash                 VARCHAR(128),
+    national_id_hash            VARCHAR(128),
 
-    -- Automated credit score. Source lineage: ETL risk computation / bureau.
-    -- Nullable because a score may not yet exist for a newly onboarded
-    -- customer. Valid range is 300-900 (Indian bureau scale).
-    credit_score        INT,
-    credit_score_source VARCHAR(50),      -- e.g. CIBIL, EXPERIAN, INTERNAL_RISK_ETL
-    credit_score_as_of  DATE,             -- effective date of the score
+    -- ------------------------------------------------------------------
+    -- Contact details
+    -- ------------------------------------------------------------------
+    email                       VARCHAR(320),   -- RFC 5321 maximum length
+    phone_number                VARCHAR(32),    -- E.164 formatted
+    address_line_1              VARCHAR(255),
+    address_line_2              VARCHAR(255),
+    city                        VARCHAR(100),
+    state_province              VARCHAR(100),
+    postal_code                 VARCHAR(20),
+    address_country_code        CHAR(2),
 
-    -- KYC lifecycle
-    kyc_status          VARCHAR(20)  NOT NULL DEFAULT 'PENDING',
-    kyc_verified_at     TIMESTAMP,
+    -- ------------------------------------------------------------------
+    -- KYC verification
+    -- ------------------------------------------------------------------
+    kyc_status                  VARCHAR(20)     NOT NULL DEFAULT 'PENDING',
+    kyc_level                   VARCHAR(20),    -- e.g. SIMPLIFIED / STANDARD / ENHANCED
+    kyc_verified_at             TIMESTAMP,
+    kyc_expires_at              TIMESTAMP,
+    kyc_verified_by             VARCHAR(100),   -- analyst id or automated engine
+    id_document_type            VARCHAR(30),    -- PASSPORT / NATIONAL_ID / DRIVING_LICENCE
+    id_document_number_hash     VARCHAR(128),
+    id_document_issuing_country CHAR(2),
+    id_document_expiry_date     DATE,
 
-    -- Address attributes (PII - restricted)
-    address_line1       VARCHAR(255),
-    address_line2       VARCHAR(255),
-    city                VARCHAR(100),
-    state               VARCHAR(100),
-    postal_code         VARCHAR(10),
-    country_code        CHAR(2)      NOT NULL DEFAULT 'IN',
+    -- ------------------------------------------------------------------
+    -- AML / screening flags
+    -- ------------------------------------------------------------------
+    pep_flag                    BOOLEAN         NOT NULL DEFAULT FALSE,  -- politically exposed person
+    sanctions_hit_flag          BOOLEAN         NOT NULL DEFAULT FALSE,
+    adverse_media_flag          BOOLEAN         NOT NULL DEFAULT FALSE,
+    screening_status            VARCHAR(20)     NOT NULL DEFAULT 'NOT_SCREENED',
+    last_screened_at            TIMESTAMP,
 
-    -- Master-data lifecycle / lineage
-    customer_status     VARCHAR(20)  NOT NULL DEFAULT 'ACTIVE',
-    source_system       VARCHAR(50),      -- originating system of record
-    record_version      INT          NOT NULL DEFAULT 1,
+    -- ------------------------------------------------------------------
+    -- Risk scoring
+    -- DOUBLE PRECISION chosen because scores are model outputs that may
+    -- be fractional; the CHECK bounds the score to a 0-100 scale.
+    -- ------------------------------------------------------------------
+    risk_score                  DOUBLE PRECISION,
+    risk_rating                 VARCHAR(10),    -- LOW / MEDIUM / HIGH / PROHIBITED
+    risk_model_version          VARCHAR(32),    -- traceability of the scoring model
+    risk_assessed_at            TIMESTAMP,
+    next_review_due_date        DATE,           -- periodic KYC refresh scheduling
 
-    -- ------------------------------------------------------------------------
-    -- Named constraints: explicit names make CI validation, rollback and
-    -- error messages deterministic across environments.
-    -- ------------------------------------------------------------------------
-    CONSTRAINT uq_customer_master_customer_id  UNIQUE (customer_id),
-    CONSTRAINT uq_customer_master_aadhaar_no   UNIQUE (aadhaar_no),
-    CONSTRAINT ck_customer_master_aadhaar_fmt  CHECK (aadhaar_no ~ '^[0-9]{12}$'),
-    CONSTRAINT ck_customer_master_credit_score CHECK (credit_score BETWEEN 300 AND 900),
-    CONSTRAINT ck_customer_master_gender       CHECK (gender IS NULL OR gender IN ('MALE','FEMALE','OTHER','UNKNOWN')),
-    CONSTRAINT ck_customer_master_kyc_status   CHECK (kyc_status IN ('PENDING','VERIFIED','REJECTED','EXPIRED')),
-    CONSTRAINT ck_customer_master_cust_status  CHECK (customer_status IN ('ACTIVE','INACTIVE','DORMANT','CLOSED')),
-    CONSTRAINT ck_customer_master_pan_fmt      CHECK (pan_no IS NULL OR pan_no ~ '^[A-Z]{5}[0-9]{4}[A-Z]$'),
-    CONSTRAINT ck_customer_master_email_fmt    CHECK (email IS NULL OR position('@' in email) > 1),
-    CONSTRAINT ck_customer_master_updated_ge_created CHECK (updated_at >= created_at)
+    -- ------------------------------------------------------------------
+    -- MDM survivorship / lifecycle
+    -- ------------------------------------------------------------------
+    record_status               VARCHAR(20)     NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE / INACTIVE / MERGED
+    golden_record_id            UUID,           -- when MERGED, points at surviving record
+    data_quality_score          DOUBLE PRECISION,
+    version                     INT             NOT NULL DEFAULT 1,  -- optimistic concurrency
+
+    -- ------------------------------------------------------------------
+    -- Standard MDM audit columns (added on first creation only)
+    -- ------------------------------------------------------------------
+    created_at                  TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP       DEFAULT CURRENT_TIMESTAMP,
+    created_by                  VARCHAR(100),
+    updated_by                  VARCHAR(100),
+
+    -- ------------------------------------------------------------------
+    -- Table-level constraints
+    -- ------------------------------------------------------------------
+    CONSTRAINT uq_customer_master_customer_number
+        UNIQUE (customer_number),
+
+    CONSTRAINT uq_customer_master_source
+        UNIQUE (source_system, source_record_id),
+
+    CONSTRAINT fk_customer_master_golden_record
+        FOREIGN KEY (golden_record_id) REFERENCES public.customer_master (id),
+
+    CONSTRAINT chk_customer_master_customer_type
+        CHECK (customer_type IN ('INDIVIDUAL', 'BUSINESS')),
+
+    CONSTRAINT chk_customer_master_kyc_status
+        CHECK (kyc_status IN ('PENDING', 'IN_REVIEW', 'VERIFIED', 'REJECTED', 'EXPIRED')),
+
+    CONSTRAINT chk_customer_master_screening_status
+        CHECK (screening_status IN ('NOT_SCREENED', 'CLEAR', 'POTENTIAL_MATCH', 'CONFIRMED_MATCH')),
+
+    CONSTRAINT chk_customer_master_risk_score
+        CHECK (risk_score IS NULL OR (risk_score >= 0 AND risk_score <= 100)),
+
+    CONSTRAINT chk_customer_master_risk_rating
+        CHECK (risk_rating IS NULL OR risk_rating IN ('LOW', 'MEDIUM', 'HIGH', 'PROHIBITED')),
+
+    CONSTRAINT chk_customer_master_record_status
+        CHECK (record_status IN ('ACTIVE', 'INACTIVE', 'MERGED')),
+
+    -- A MERGED record must point at its survivor; non-merged records must not.
+    CONSTRAINT chk_customer_master_merge_consistency
+        CHECK ((record_status = 'MERGED' AND golden_record_id IS NOT NULL)
+            OR (record_status <> 'MERGED' AND golden_record_id IS NULL)),
+
+    CONSTRAINT chk_customer_master_version_positive
+        CHECK (version >= 1)
 );
 
--- ----------------------------------------------------------------------------
--- 2. Secondary indexes
---    Note: PRIMARY KEY (id), UNIQUE (customer_id) and UNIQUE (aadhaar_no)
---    already create B-tree indexes; do not duplicate them.
--- ----------------------------------------------------------------------------
--- Case-insensitive email lookups from UI search / ETL matching.
-CREATE INDEX IF NOT EXISTS ix_customer_master_email_lower
-    ON public.customer_master (lower(email));
+-- =====================================================================
+-- Indexes
+-- (customer_number and source composite are already covered by the
+--  UNIQUE constraints above, which create backing indexes.)
+-- =====================================================================
 
--- Mobile-based customer search (contact-centre / OTP flows).
-CREATE INDEX IF NOT EXISTS ix_customer_master_mobile_no
-    ON public.customer_master (mobile_no);
-
--- Partial index: only non-null PAN values are worth indexing.
-CREATE INDEX IF NOT EXISTS ix_customer_master_pan_no
-    ON public.customer_master (pan_no)
-    WHERE pan_no IS NOT NULL;
-
--- Operational filtering by KYC / customer lifecycle state.
+-- Operational queues: analysts filter by KYC status constantly.
 CREATE INDEX IF NOT EXISTS ix_customer_master_kyc_status
     ON public.customer_master (kyc_status);
 
-CREATE INDEX IF NOT EXISTS ix_customer_master_customer_status
-    ON public.customer_master (customer_status);
+-- Risk dashboards and enhanced-due-diligence workflows.
+CREATE INDEX IF NOT EXISTS ix_customer_master_risk_rating
+    ON public.customer_master (risk_rating);
 
--- Risk analytics: range scans on credit score (partial - skip unscored rows).
-CREATE INDEX IF NOT EXISTS ix_customer_master_credit_score
-    ON public.customer_master (credit_score)
-    WHERE credit_score IS NOT NULL;
+-- Partial index: only ACTIVE records need periodic-review scheduling.
+CREATE INDEX IF NOT EXISTS ix_customer_master_next_review_due
+    ON public.customer_master (next_review_due_date)
+    WHERE record_status = 'ACTIVE';
 
--- Incremental / CDC extraction by ETL.
+-- Partial index for screening exceptions; hits are rare so index stays tiny.
+CREATE INDEX IF NOT EXISTS ix_customer_master_screening_hits
+    ON public.customer_master (screening_status)
+    WHERE pep_flag OR sanctions_hit_flag OR adverse_media_flag;
+
+-- Case-insensitive email lookup used by match/merge rules.
+CREATE INDEX IF NOT EXISTS ix_customer_master_email_lower
+    ON public.customer_master (LOWER(email));
+
+-- Fuzzy-match candidate retrieval (name + DOB blocking key).
+CREATE INDEX IF NOT EXISTS ix_customer_master_name_dob
+    ON public.customer_master (LOWER(last_name), LOWER(first_name), date_of_birth);
+
+-- Survivorship navigation from merged duplicates to golden record.
+CREATE INDEX IF NOT EXISTS ix_customer_master_golden_record
+    ON public.customer_master (golden_record_id)
+    WHERE golden_record_id IS NOT NULL;
+
+-- Incremental CDC extraction by downstream consumers.
 CREATE INDEX IF NOT EXISTS ix_customer_master_updated_at
     ON public.customer_master (updated_at);
 
--- ----------------------------------------------------------------------------
--- 3. updated_at maintenance trigger
---    Guarantees updated_at is always refreshed on UPDATE regardless of whether
---    the calling ETL/UI sets it, and bumps record_version for optimistic
---    concurrency / lineage.
--- ----------------------------------------------------------------------------
+-- =====================================================================
+-- updated_at maintenance trigger (schema object, not DML).
+-- Guarantees updated_at is refreshed even when callers forget to set it.
+-- =====================================================================
 CREATE OR REPLACE FUNCTION public.fn_customer_master_set_updated_at()
 RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    NEW.updated_at     := CURRENT_TIMESTAMP;
-    NEW.record_version := COALESCE(OLD.record_version, 0) + 1;
+    NEW.updated_at := CURRENT_TIMESTAMP;
     RETURN NEW;
 END;
 $$;
 
 DROP TRIGGER IF EXISTS trg_customer_master_set_updated_at ON public.customer_master;
+
 CREATE TRIGGER trg_customer_master_set_updated_at
     BEFORE UPDATE ON public.customer_master
     FOR EACH ROW
     EXECUTE FUNCTION public.fn_customer_master_set_updated_at();
 
--- ----------------------------------------------------------------------------
--- 4. Data dictionary / MDM catalogue metadata (queryable via pg_description)
--- ----------------------------------------------------------------------------
-COMMENT ON TABLE  public.customer_master IS
-    'Customer 360 golden record. System of record for master customer attributes. Domain: Core Banking. Steward: Data Governance.';
-COMMENT ON COLUMN public.customer_master.id IS
-    'Surrogate primary key (UUID v4). Internal only; never exposed as a business identifier.';
-COMMENT ON COLUMN public.customer_master.customer_id IS
-    'Business/natural key: core banking CIF number. UPSERT conflict target for ETL.';
-COMMENT ON COLUMN public.customer_master.aadhaar_no IS
-    'Classification: SENSITIVE PII (Aadhaar). 12-digit numeric. NOT NULL UNIQUE. Encryption-at-rest required; access restricted to KYC_OFFICER role; must be masked (XXXX-XXXX-1234) in logs, UI and non-prod environments.';
-COMMENT ON COLUMN public.customer_master.credit_score IS
-    'Automated credit score, valid range 300-900. Lineage: ETL risk computation / credit bureau feed. NULL = not yet scored.';
-COMMENT ON COLUMN public.customer_master.credit_score_source IS
-    'Provenance of credit_score (e.g. CIBIL, EXPERIAN, INTERNAL_RISK_ETL).';
-COMMENT ON COLUMN public.customer_master.credit_score_as_of IS
-    'Effective/as-of date of credit_score as reported by the source.';
-COMMENT ON COLUMN public.customer_master.pan_no IS
-    'Classification: SENSITIVE PII (PAN). Format AAAAA9999A.';
-COMMENT ON COLUMN public.customer_master.email IS
-    'Classification: RESTRICTED PII.';
-COMMENT ON COLUMN public.customer_master.mobile_no IS
-    'Classification: RESTRICTED PII.';
-COMMENT ON COLUMN public.customer_master.created_at IS
-    'MDM audit: row creation timestamp (server time).';
-COMMENT ON COLUMN public.customer_master.updated_at IS
-    'MDM audit: last modification timestamp, maintained by trigger.';
+-- =====================================================================
+-- Column documentation
+-- =====================================================================
+COMMENT ON TABLE  public.customer_master IS 'MDM golden record for customer KYC profile and AML risk scoring.';
+COMMENT ON COLUMN public.customer_master.customer_number IS 'Business key; stable identifier exposed to downstream systems and used as UPSERT conflict target.';
+COMMENT ON COLUMN public.customer_master.tax_id_hash IS 'Salted hash of tax identifier; plaintext held only in tokenisation vault.';
+COMMENT ON COLUMN public.customer_master.risk_score IS 'Model-generated risk score on a 0-100 scale.';
+COMMENT ON COLUMN public.customer_master.risk_model_version IS 'Version of the scoring model that produced risk_score, for audit reproducibility.';
+COMMENT ON COLUMN public.customer_master.golden_record_id IS 'Self-reference to the surviving record when this row has been merged.';
+COMMENT ON COLUMN public.customer_master.version IS 'Monotonic row version for optimistic concurrency control.';
 
--- ----------------------------------------------------------------------------
--- 5. Access control baseline for PII (roles are provisioned by the platform)
---    Left as governance guidance; uncomment once roles exist in target env.
--- ----------------------------------------------------------------------------
--- REVOKE ALL ON public.customer_master FROM PUBLIC;
--- GRANT SELECT (id, customer_id, first_name, last_name, kyc_status, customer_status, credit_score)
---     ON public.customer_master TO app_readonly;
--- GRANT SELECT, INSERT, UPDATE ON public.customer_master TO mdm_etl_writer;
--- GRANT SELECT (aadhaar_no, pan_no) ON public.customer_master TO kyc_officer;
-
--- ----------------------------------------------------------------------------
--- 6. Intended UPSERT pattern (documentation only -- NOT executed here)
---    The ETL loads a cleansed payload keyed on the business key customer_id.
---    aadhaar_no is a second UNIQUE key; a conflict on aadhaar_no with a
---    DIFFERENT customer_id indicates a duplicate identity and must be routed
---    to the MDM survivorship / stewardship queue rather than silently merged.
+-- =====================================================================
+-- Intended UPSERT pattern (documentation only - NOT executed here)
+-- =====================================================================
+-- Loads from the cleansing pipeline should target the business key so a
+-- re-delivered record updates in place rather than creating a duplicate.
+-- Audit columns are handled as follows: created_at / created_by are set
+-- only on INSERT (never overwritten), updated_at is bumped by the trigger,
+-- and version is incremented to support optimistic locking.
 --
---    INSERT INTO public.customer_master (
---        customer_id, first_name, middle_name, last_name, date_of_birth, gender,
---        email, mobile_no, pan_no, aadhaar_no, credit_score, credit_score_source,
---        credit_score_as_of, kyc_status, address_line1, address_line2, city,
---        state, postal_code, country_code, customer_status, source_system)
---    VALUES (...)
---    ON CONFLICT (customer_id) DO UPDATE SET
---        first_name          = EXCLUDED.first_name,
---        middle_name         = EXCLUDED.middle_name,
---        last_name           = EXCLUDED.last_name,
---        date_of_birth       = EXCLUDED.date_of_birth,
---        gender              = EXCLUDED.gender,
---        email               = EXCLUDED.email,
---        mobile_no           = EXCLUDED.mobile_no,
---        pan_no              = EXCLUDED.pan_no,
---        aadhaar_no          = EXCLUDED.aadhaar_no,
---        credit_score        = EXCLUDED.credit_score,
---        credit_score_source = EXCLUDED.credit_score_source,
---        credit_score_as_of  = EXCLUDED.credit_score_as_of,
---        kyc_status          = EXCLUDED.kyc_status,
---        address_line1       = EXCLUDED.address_line1,
---        address_line2       = EXCLUDED.address_line2,
---        city                = EXCLUDED.city,
---        state               = EXCLUDED.state,
---        postal_code         = EXCLUDED.postal_code,
---        country_code        = EXCLUDED.country_code,
---        customer_status     = EXCLUDED.customer_status,
---        source_system       = EXCLUDED.source_system,
---        updated_at          = CURRENT_TIMESTAMP
---    WHERE public.customer_master.updated_at < EXCLUDED.updated_at;   -- optional last-write-wins guard
+--   INSERT INTO public.customer_master (
+--       customer_number, source_system, source_record_id, customer_type,
+--       first_name, last_name, date_of_birth, email, kyc_status,
+--       risk_score, risk_rating, risk_model_version, risk_assessed_at,
+--       created_by, updated_by
+--   )
+--   VALUES (...)
+--   ON CONFLICT (customer_number) DO UPDATE SET
+--       source_system      = EXCLUDED.source_system,
+--       source_record_id   = EXCLUDED.source_record_id,
+--       customer_type      = EXCLUDED.customer_type,
+--       first_name         = EXCLUDED.first_name,
+--       last_name          = EXCLUDED.last_name,
+--       date_of_birth      = EXCLUDED.date_of_birth,
+--       email              = EXCLUDED.email,
+--       kyc_status         = EXCLUDED.kyc_status,
+--       risk_score         = EXCLUDED.risk_score,
+--       risk_rating        = EXCLUDED.risk_rating,
+--       risk_model_version = EXCLUDED.risk_model_version,
+--       risk_assessed_at   = EXCLUDED.risk_assessed_at,
+--       updated_by         = EXCLUDED.updated_by,
+--       version            = public.customer_master.version + 1
+--   WHERE public.customer_master.record_status <> 'MERGED';
 --
---    id, created_at are never overwritten; updated_at / record_version are
---    also enforced by trg_customer_master_set_updated_at.
-
--- ----------------------------------------------------------------------------
--- 7. Governance note: phased strategy if the table ALREADY exists with rows
---    (kept for completeness of the migration contract; not executed here)
---
---    Step 1: ALTER TABLE public.customer_master ADD COLUMN IF NOT EXISTS aadhaar_no VARCHAR(12);
---            ALTER TABLE public.customer_master ADD COLUMN IF NOT EXISTS credit_score INT;
---            ALTER TABLE public.customer_master ADD CONSTRAINT ck_customer_master_credit_score
---                CHECK (credit_score BETWEEN 300 AND 900);
---    Step 2: Backfill aadhaar_no from the KYC source system via ETL (no placeholder
---            values are permitted for a UNIQUE column; Data Governance approval required
---            for any exception).
---    Step 3: CREATE UNIQUE INDEX CONCURRENTLY uq_customer_master_aadhaar_no
---                ON public.customer_master (aadhaar_no);
---            ALTER TABLE public.customer_master ADD CONSTRAINT uq_customer_master_aadhaar_no
---                UNIQUE USING INDEX uq_customer_master_aadhaar_no;
---    Step 4: Validate zero NULLs, then
---            ALTER TABLE public.customer_master ALTER COLUMN aadhaar_no SET NOT NULL;
--- ----------------------------------------------------------------------------
-
--- ----------------------------------------------------------------------------
--- 8. ROLLBACK SCRIPT  (V001__create_customer_master__rollback.sql)
---    Executed only by the CI rollback-verification stage or a DBA.
---    Order matters: trigger -> function -> indexes -> table.
---
---    DROP TRIGGER  IF EXISTS trg_customer_master_set_updated_at ON public.customer_master;
---    DROP FUNCTION IF EXISTS public.fn_customer_master_set_updated_at();
---    DROP INDEX    IF EXISTS ix_customer_master_email_lower;
---    DROP INDEX    IF EXISTS ix_customer_master_mobile_no;
---    DROP INDEX    IF EXISTS ix_customer_master_pan_no;
---    DROP INDEX    IF EXISTS ix_customer_master_kyc_status;
---    DROP INDEX    IF EXISTS ix_customer_master_customer_status;
---    DROP INDEX    IF EXISTS ix_customer_master_credit_score;
---    DROP INDEX    IF EXISTS ix_customer_master_updated_at;
---    DROP TABLE    IF EXISTS public.customer_master;
--- ----------------------------------------------------------------------------
+-- The trailing WHERE prevents a stale source feed from resurrecting a
+-- record that has already been merged into another golden record.
+-- Use COALESCE(EXCLUDED.col, customer_master.col) per column if the
+-- survivorship rule is 'do not overwrite with NULL'.

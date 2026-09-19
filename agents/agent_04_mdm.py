@@ -494,16 +494,30 @@ def upsert_golden_record(
 # Step 6: MDM Agent Execution Orchestrator
 # ==========================================
 
-def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, execute_live: bool = False) -> ProjectState:
+def run_mdm_agent_autonomous(
+    state: ProjectState, 
+    sample_record: dict = None, 
+    execute_live: bool = False,
+    reset: bool = False
+) -> ProjectState:
     """
     Autonomous Agent 04 Orchestrator:
-    1. Fetch MDM details from Jira (Step 01)
-    2. Generate DDL script from requirement context (Step 02)
+    1. Fetch MDM details from Jira
+    2. Generate DDL script from requirement context
     3. Save output/mdm/schema.sql artifact
-    4. Dry-run validation via DuckDB parser (Step 03)
-    5. Live target schema execution via PostgreSQL driver (Step 04)
+    4. Dry-run validation via DuckDB parser
+    5. Live target schema execution via PostgreSQL driver
     """
     print("--- Running Autonomous Agent 04 (MDM Engine) ---")
+
+    if reset:
+        # Reset state attributes for Agent 04
+        state.mdm_ddl = ""
+        # Optionally remove generated SQL artifact on fresh start
+        project_root = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
+        schema_file = project_root / "output" / "mdm" / "schema.sql"
+        if schema_file.exists():
+            schema_file.unlink()
 
     jira_spec = ""
     if getattr(state, "jira_mdm_issue_key", None):
@@ -521,10 +535,7 @@ def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, ex
     })
 
     try:
-        # Step 02: Code Generation — check the LIVE table's actual current
-        # schema first, so a new Jira story extends it (ALTER ADD COLUMN)
-        # instead of generating a disconnected, unrelated table from the
-        # Jira text alone.
+        # Step 02: Code Generation
         existing_schema = fetch_existing_customer_master_schema()
         print(
             f"[1/4] Generating production PostgreSQL DDL "
