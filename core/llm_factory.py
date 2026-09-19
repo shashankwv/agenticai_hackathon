@@ -40,44 +40,47 @@ def get_llm(temperature: float = 0.0, schema=None):
 
     # 0. OpenRouter — immediate fallback when Azure is unreachable/erroring
     # (or when Azure isn't configured at all).
-    if openrouter_key:
-        raw_models.append(
-            ChatOpenAI(
-                model=os.getenv("OPENROUTER_MODEL", "liquid/lfm-2.5-2.6b:free"),
-                temperature=temperature,
-                openai_api_key=openrouter_key,
-                openai_api_base="https://openrouter.ai/api/v1",
-                # Free-tier OpenRouter models default to a low completion cap
-                # and many silently spend most of it on hidden "reasoning"
-                # tokens, truncating longer structured-output responses (e.g.
-                # generated Streamlit code) mid-string. Give it real headroom
-                # for both reasoning and the actual output.
-                max_tokens=8192,
-                timeout=180,
-            )
-        )
+
+
+    # if openrouter_key:
+    #     raw_models.append(
+    #         ChatOpenAI(
+    #             model=os.getenv("OPENROUTER_MODEL", "liquid/lfm-2.5-2.6b:free"),
+    #             temperature=temperature,
+    #             openai_api_key=openrouter_key,
+    #             openai_api_base="https://openrouter.ai/api/v1",
+    #             # Free-tier OpenRouter models default to a low completion cap
+    #             # and many silently spend most of it on hidden "reasoning"
+    #             # tokens, truncating longer structured-output responses (e.g.
+    #             # generated Streamlit code) mid-string. Give it real headroom
+    #             # for both reasoning and the actual output.
+    #             max_tokens=8192,
+    #             timeout=180,
+    #         )
+    #     )
 
     # 1. Primary Model
-    if primary_key:
-        raw_models.append(
-            ChatGoogleGenerativeAI(
-                model="gemini-3.6-flash",
-                temperature=temperature,
-                google_api_key=primary_key,
-            )
-        )
+
+    # if primary_key:
+    #     raw_models.append(
+    #         ChatGoogleGenerativeAI(
+    #             model="gemini-3.6-flash",
+    #             temperature=temperature,
+    #             google_api_key=primary_key,
+    #         )
+    #     )
 
 
-    if groq_key:
-        raw_models.append(
-            ChatGroq(
-                model="qwen/qwen3.8-27b",
-                temperature=temperature,
-                # max_tokens=600,  # Caps expected output below 1000 OTPM
-                # max_retries=0,   # Instantly triggers fallbacks if rate limited
-                groq_api_key=groq_key,
-            )
-        )
+    # if groq_key:
+    #     raw_models.append(
+    #         ChatGroq(
+    #             model="qwen/qwen3.8-27b",
+    #             temperature=temperature,
+    #             # max_tokens=600,  # Caps expected output below 1000 OTPM
+    #             # max_retries=0,   # Instantly triggers fallbacks if rate limited
+    #             groq_api_key=groq_key,
+    #         )
+    #     )
 
 
 
@@ -94,21 +97,22 @@ def get_llm(temperature: float = 0.0, schema=None):
 
 
     # 3. Backup Gemini Models
-    if primary_key:
-        raw_models.append(
-            ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                temperature=temperature,
-                google_api_key=primary_key,
-            )
-        )
-        raw_models.append(
-            ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                temperature=temperature,
-                google_api_key=primary_key,
-            )
-        )
+    
+    # if primary_key:
+    #     raw_models.append(
+    #         ChatGoogleGenerativeAI(
+    #             model="gemini-2.0-flash",
+    #             temperature=temperature,
+    #             google_api_key=primary_key,
+    #         )
+    #     )
+    #     raw_models.append(
+    #         ChatGoogleGenerativeAI(
+    #             model="gemini-1.5-flash",
+    #             temperature=temperature,
+    #             google_api_key=primary_key,
+    #         )
+    #     )
 
     if not raw_models:
         raise ValueError("No valid API keys found in environment.")
