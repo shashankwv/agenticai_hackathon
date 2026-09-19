@@ -17,7 +17,12 @@ import streamlit.components.v1 as components
 # ============================================================================
 # CONSOLIDATED AGENT IMPORTS
 # ============================================================================
-from agents.agent_01_requirements import run_requirements_agent, split_requirement_into_jira_tasks, fetch_confluence_page, create_jira_issues_parallel
+from agents.agent_01_requirements import (
+    run_requirements_agent,
+    split_requirement_into_jira_tasks,
+    fetch_confluence_page,
+    create_jira_issues_parallel,
+)
 from agents.agent_02_ui_code_generation import run_ui_code_generation_agent
 from agents.agent_03_etl import run_etl_agent
 from agents.agent_04_mdm import run_mdm_agent_autonomous, ensure_postgres_running
@@ -50,7 +55,7 @@ def ensure_ui_server_running(state_obj: ProjectState, max_retries: int = 3) -> b
     try:
         if os.name == "nt":  # Windows
             subprocess.run(
-                ["cmd", "/c", "for /f \"tokens=5\" %a in ('netstat -aon ^| findstr :8502') do taskkill /F /PID %a"],
+                ["cmd", "/c", 'for /f "tokens=5" %a in (\'netstat -aon ^| findstr :8502\') do taskkill /F /PID %a'],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -109,10 +114,11 @@ def ensure_ui_server_running(state_obj: ProjectState, max_retries: int = 3) -> b
 
     return False
 
+
 def ensure_api_bridge_running() -> bool:
     """Spawns the FastAPI backend bridge on port 8000 if not already active."""
     health_url = "http://127.0.0.1:8000/health"
-    
+
     # Check if port 8000 is already active
     try:
         if requests.get(health_url, timeout=1.0).status_code == 200:
@@ -128,7 +134,7 @@ def ensure_api_bridge_running() -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        
+
         # Wait up to 5 seconds for backend activation
         for _ in range(10):
             time.sleep(0.5)
@@ -139,8 +145,9 @@ def ensure_api_bridge_running() -> bool:
                 continue
     except Exception as err:
         print(f"[API Bridge Launch Error]: {err}")
-        
+
     return False
+
 
 # --- STREAMLIT CONFIGURATION & ACCESSIBLE UI DESIGN SYSTEM ---
 st.set_page_config(
@@ -620,6 +627,9 @@ if "pending_hitl_breakdown" not in st.session_state:
 if "hitl_approved" not in st.session_state:
     st.session_state.hitl_approved = None
 
+if "resume_pipeline_after_hitl" not in st.session_state:
+    st.session_state.resume_pipeline_after_hitl = False
+
 state = st.session_state.project_state
 terminal_placeholder = None
 
@@ -936,6 +946,75 @@ with col_terminal:
     update_terminal_ui()
 
 
+# --- HELPER: EXECUTE PHASES 2 THROUGH 4 ---
+def execute_phases_2_through_4():
+    """Executes Phases 2, 3, and 4 sequentially as part of the end-to-end flow."""
+    p_start = time.perf_counter()
+
+    # Agent 02
+    add_log("")
+    add_log("[2/4] Executing Agent 02 (UI Engine Code Generation)...", "EXEC")
+    add_log("[PROCESSING...] Generating UI Code...", "WARN")
+    t_start = time.perf_counter()
+    st.session_state.project_state = run_ui_code_generation_agent(
+        st.session_state.project_state, reset=start_fresh
+    )
+    elapsed_a2 = time.perf_counter() - t_start
+    ui_alive = ensure_ui_server_running(st.session_state.project_state, max_retries=3)
+    if (
+        st.session_state.execution_logs
+        and st.session_state.execution_logs[-1]["level"] == "WARN"
+    ):
+        st.session_state.execution_logs.pop()
+    add_log(f"Agent 02 Complete (<b>Took {elapsed_a2:.2f}s</b>).", "SUCCESS")
+    if ui_alive:
+        add_log("UI Server Online on Port 8502.", "SUCCESS")
+    else:
+        add_log("Port 8502 offline.", "WARN")
+
+    # Agent 03
+    add_log("")
+    add_log("[3/4] Executing Agent 03 (ETL Processing & DuckDB)...", "EXEC")
+    add_log("[PROCESSING...] Executing Staging ETL...", "WARN")
+    t_start = time.perf_counter()
+    st.session_state.project_state = run_etl_agent(
+        st.session_state.project_state, reset=start_fresh
+    )
+    elapsed_a3 = time.perf_counter() - t_start
+    if (
+        st.session_state.execution_logs
+        and st.session_state.execution_logs[-1]["level"] == "WARN"
+    ):
+        st.session_state.execution_logs.pop()
+    add_log(f"Agent 03 Complete (<b>Took {elapsed_a3:.2f}s</b>).", "SUCCESS")
+
+    # Agent 04
+    add_log("")
+    add_log("[4/4] Executing Agent 04 (MDM DDL & Postgres Execution)...", "EXEC")
+    add_log("[PROCESSING...] Deploying MDM Schema...", "WARN")
+    t_start = time.perf_counter()
+    st.session_state.project_state = run_mdm_agent_autonomous(
+        st.session_state.project_state,
+        execute_live=st.session_state.get("sb_exec_live", True),
+        reset=start_fresh,
+    )
+    elapsed_a4 = time.perf_counter() - t_start
+    if (
+        st.session_state.execution_logs
+        and st.session_state.execution_logs[-1]["level"] == "WARN"
+    ):
+        st.session_state.execution_logs.pop()
+    add_log(f"Agent 04 Complete (<b>Took {elapsed_a4:.2f}s</b>).", "SUCCESS")
+
+    total_elapsed = time.perf_counter() - p_start
+    add_log("")
+    add_log(
+        f"Full Pipeline Execution Complete in <b>Took {total_elapsed:.2f}s</b>!",
+        "SUCCESS",
+    )
+    st.toast("🎉 Pipeline Executed Successfully!")
+
+
 # --- HANDLE RESUMED HITL FLOW ---
 if st.session_state.pending_hitl_breakdown is not None:
     if st.session_state.hitl_approved is None:
@@ -946,17 +1025,23 @@ if st.session_state.pending_hitl_breakdown is not None:
         st.session_state.pending_hitl_breakdown = None
         st.session_state.hitl_approved = None
         add_log("Agent 01 Jira tickets created successfully.", "SUCCESS")
+
+        # If HITL was triggered during an end-to-end run, continue with Phases 2-4
+        if st.session_state.resume_pipeline_after_hitl:
+            st.session_state.resume_pipeline_after_hitl = False
+            execute_phases_2_through_4()
         st.rerun()
+
     elif st.session_state.hitl_approved is False:
         add_log("[Human-in-Loop]: Rejected ticket creation.", "WARN")
         st.session_state.pending_hitl_breakdown = None
         st.session_state.hitl_approved = None
+        st.session_state.resume_pipeline_after_hitl = False
         st.rerun()
 
 
 # --- SIDEBAR & AGENT EXECUTION HANDLERS ---
 if run_pipeline_clicked:
-    pipeline_start_time = time.perf_counter()
     if st.session_state.execution_logs:
         add_log("")
     add_log("Initiating Full Pipeline Execution...", "EXEC")
@@ -975,79 +1060,24 @@ if run_pipeline_clicked:
         state.jira_etl_task = breakdown.etl_task_description
         state.jira_mdm_task = breakdown.mdm_task_description
         st.session_state.pending_hitl_breakdown = breakdown
+        st.session_state.resume_pipeline_after_hitl = True
         add_log("[Human-in-Loop]: Awaiting user approval on ticket creation...", "WARN")
         st.rerun()
     else:
         state = run_requirements_agent(
             state, page_id=page_id_input, project_key=project_key_input, human_in_loop=False
         )
+        elapsed_a1 = time.perf_counter() - t_start
+        if (
+            st.session_state.execution_logs
+            and st.session_state.execution_logs[-1]["level"] == "WARN"
+        ):
+            st.session_state.execution_logs.pop()
+        add_log(f"Agent 01 Complete (<b>Took {elapsed_a1:.2f}s</b>).", "SUCCESS")
 
-    elapsed_a1 = time.perf_counter() - t_start
-    if (
-        st.session_state.execution_logs
-        and st.session_state.execution_logs[-1]["level"] == "WARN"
-    ):
-        st.session_state.execution_logs.pop()
-    add_log(f"Agent 01 Complete (<b>Took {elapsed_a1:.2f}s</b>).", "SUCCESS")
-
-    # Agent 02
-    add_log("")
-    add_log("[2/4] Executing Agent 02 (UI Engine Code Generation)...", "EXEC")
-    add_log("[PROCESSING...] Generating UI Code...", "WARN")
-    t_start = time.perf_counter()
-    state = run_ui_code_generation_agent(state, reset=start_fresh)
-    elapsed_a2 = time.perf_counter() - t_start
-    ui_alive = ensure_ui_server_running(state, max_retries=3)
-    if (
-        st.session_state.execution_logs
-        and st.session_state.execution_logs[-1]["level"] == "WARN"
-    ):
-        st.session_state.execution_logs.pop()
-    add_log(f"Agent 02 Complete (<b>Took {elapsed_a2:.2f}s</b>).", "SUCCESS")
-    if ui_alive:
-        add_log("UI Server Online on Port 8502.", "SUCCESS")
-    else:
-        add_log("Port 8502 offline.", "WARN")
-
-    # Agent 03
-    add_log("")
-    add_log("[3/4] Executing Agent 03 (ETL Processing & DuckDB)...", "EXEC")
-    add_log("[PROCESSING...] Executing Staging ETL...", "WARN")
-    t_start = time.perf_counter()
-    state = run_etl_agent(state, reset=start_fresh)
-    elapsed_a3 = time.perf_counter() - t_start
-    if (
-        st.session_state.execution_logs
-        and st.session_state.execution_logs[-1]["level"] == "WARN"
-    ):
-        st.session_state.execution_logs.pop()
-    add_log(f"Agent 03 Complete (<b>Took {elapsed_a3:.2f}s</b>).", "SUCCESS")
-
-    # Agent 04
-    add_log("")
-    add_log("[4/4] Executing Agent 04 (MDM DDL & Postgres Execution)...", "EXEC")
-    add_log("[PROCESSING...] Deploying MDM Schema...", "WARN")
-    t_start = time.perf_counter()
-    state = run_mdm_agent_autonomous(
-        state, execute_live=st.session_state.get("sb_exec_live", True), reset=start_fresh
-    )
-    elapsed_a4 = time.perf_counter() - t_start
-    if (
-        st.session_state.execution_logs
-        and st.session_state.execution_logs[-1]["level"] == "WARN"
-    ):
-        st.session_state.execution_logs.pop()
-    add_log(f"Agent 04 Complete (<b>Took {elapsed_a4:.2f}s</b>).", "SUCCESS")
-
-    total_elapsed = time.perf_counter() - pipeline_start_time
-    add_log("")
-    add_log(
-        f"Full Pipeline Execution Complete in <b>Took {total_elapsed:.2f}s</b>!",
-        "SUCCESS",
-    )
-    st.session_state.project_state = state
-    st.toast("🎉 Pipeline Executed Successfully!")
-    st.rerun()
+        # Directly run Phases 2 through 4 if HITL is disabled
+        execute_phases_2_through_4()
+        st.rerun()
 
 if reset_clicked:
     st.session_state.project_state = ProjectState()
@@ -1055,6 +1085,7 @@ if reset_clicked:
     st.session_state.has_initialized = True
     st.session_state.pending_hitl_breakdown = None
     st.session_state.hitl_approved = None
+    st.session_state.resume_pipeline_after_hitl = False
     add_log("System state and memory reset.")
     st.toast("✨ System Reset Complete!")
     st.rerun()
@@ -1075,6 +1106,7 @@ if run_phase_1:
         state.jira_etl_task = breakdown.etl_task_description
         state.jira_mdm_task = breakdown.mdm_task_description
         st.session_state.pending_hitl_breakdown = breakdown
+        st.session_state.resume_pipeline_after_hitl = False
         add_log("[Human-in-Loop]: Awaiting user approval on ticket creation...", "WARN")
         st.rerun()
     else:
@@ -1244,7 +1276,7 @@ with tab_a3:
                         cwd=PROJECT_ROOT,
                         capture_output=True,
                         text=True,
-                        timeout=30
+                        timeout=30,
                     )
                     add_log("Executed etl_pipeline.py successfully.", "SUCCESS")
                     st.success("ETL Pipeline executed!")
