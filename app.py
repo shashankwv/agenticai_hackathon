@@ -25,7 +25,7 @@ from agents.agent_01_requirements import (
 )
 from agents.agent_02_ui_code_generation import run_ui_code_generation_agent
 from agents.agent_03_etl import run_etl_agent
-from agents.agent_04_mdm import run_mdm_agent_autonomous, ensure_postgres_running
+from agents.agent_04_mdm import run_mdm_agent_autonomous, ensure_postgres_running, ensure_table_initialized
 
 from core.state import ProjectState
 
@@ -1366,9 +1366,13 @@ with tab_a4:
 
         if postgres_ready:
             try:
-                conn = psycopg2.connect(
-                    "postgresql://postgres:postgres@localhost:5432/mdm_db"
-                )
+                db_uri = os.getenv("POSTGRES_CONNECTION_URI", "postgresql://postgres:postgres@localhost:5432/mdm_db")
+                sample_payload = getattr(state, "sample_cleansed_output", {"id": "1", "status": "initialized"})
+                
+                # Check and dynamically trigger Agent 04 table initialization on the fly if table doesn't exist
+                ensure_table_initialized(sample_payload, db_uri=db_uri)
+
+                conn = psycopg2.connect(db_uri)
                 df = pd.read_sql("SELECT * FROM public.customer_master;", conn)
                 conn.close()
                 st.dataframe(df, use_container_width=True)

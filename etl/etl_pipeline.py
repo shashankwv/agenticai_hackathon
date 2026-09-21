@@ -5,100 +5,95 @@ import pandas as pd
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "etl.duckdb"
-AADHAAR_RE = re.compile(r"^\d{12}$")
-STG_COLS = ["id", "aadhaar_no", "aadhaar_masked", "credit_score", "monthly_income", "credit_history", "risk_index", "status", "error_code"]
+MOBILE_LEN = 10
+FIELD_MAP = {"alt_phone": "alternate_contact_number", "secondary_phone": "alternate_contact_number", "phone": "primary_contact_number", "mobile": "primary_contact_number"}
+TARGET_COLS = ["id", "customer_name", "email", "primary_contact_number", "alternate_contact_number", "channel", "changed_by", "processed_at"]
+DQ_EXCEPTIONS: list[dict] = []
+AUDIT_RECORDS: list[dict] = []
 
 
 def mask_sensitive_value(val: str, keep_last: int = 4) -> str:
-    digits = re.sub(r"\D", "", str(val or ""))
-    tail = digits[-keep_last:] if keep_last > 0 and digits else ""
-    full = "X" * max(len(digits) - len(tail), 0) + tail
-    if not full:
-        return "X" * max(keep_last, 4)
-    return "-".join(full[i:i + 4] for i in range(0, len(full), 4))
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val)
+    if len(s) <= keep_last:
+        return "*" * len(s)
+    return "*" * (len(s) - keep_last) + s[-keep_last:]
 
 
-def sanitize_aadhaar(raw):
-    if raw is None or str(raw).strip() == "":
-        return "", "E001_MISSING_AADHAAR"
-    digits = re.sub(r"\D", "", str(raw))
-    if not AADHAAR_RE.match(digits):
-        return digits, "E002_INVALID_AADHAAR_FORMAT"
-    return digits, None
+def normalize_number(val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    return re.sub(r"\D", "", str(val)) or None
 
 
-def normalize_credit_score(score):
-    try:
-        s = int(float(score))
-    except (TypeError, ValueError):
-        return None, "E003_INVALID_CREDIT_SCORE"
-    return min(max(s, 300), 900), None
-
-
-def compute_risk_index(monthly_income, credit_history) -> float:
-    try:
-        income = float(monthly_income or 0)
-    except (TypeError, ValueError):
-        income = 0.0
-    hist = str(credit_history or "unknown").strip().lower()
-    hist_score = {"excellent": 10, "good": 30, "fair": 55, "poor": 80, "none": 70}.get(hist, 60)
-    income_score = 80 if income < 15000 else 55 if income < 40000 else 30 if income < 100000 else 10
-    return round(0.5 * income_score + 0.5 * hist_score, 2)
+def log_dq(rid, field, value, rule):
+    DQ_EXCEPTIONS.append({"id": rid, "field": field, "value": mask_sensitive_value(value), "rule": rule, "logged_at": pd.Timestamp.utcnow()})
 
 
 def transform_batch(raw_records: list[dict]) -> list[dict]:
     out = []
     for rec in raw_records:
-        aadhaar, err = sanitize_aadhaar(rec.get("aadhaar_no"))
-        score, score_err = normalize_credit_score(rec.get("credit_score"))
-        err = err or score_err
-        try:
-            income = float(rec.get("monthly_income")) if rec.get("monthly_income") is not None else None
-        except (TypeError, ValueError):
-            income = None
-        out.append({
-            "id": str(rec.get("id", "")), "aadhaar_no": aadhaar if not err else None,
-            "aadhaar_masked": mask_sensitive_value(aadhaar), "credit_score": score,
-            "monthly_income": income, "credit_history": rec.get("credit_history"),
-            "risk_index": compute_risk_index(income, rec.get("credit_history")),
-            "status": "rejected" if err else "ok", "error_code": err,
-        })
+        row = {FIELD_MAP.get(k, k): v for k, v in rec.items()}
+        rid = row.get("id")
+        primary = normalize_number(row.get("primary_contact_number"))
+        raw_alt = row.get("alternate_contact_number")
+        alt = normalize_number(raw_alt)
+        if alt is not None and len(alt) != MOBILE_LEN:
+            log_dq(rid, "alternate_contact_number", raw_alt, "invalid_mobile_length")
+            alt = None
+        if alt is not None and alt == primary:
+            log_dq(rid, "alternate_contact_number", raw_alt, "equals_primary_contact_number")
+            alt = None
+        old_alt = row.pop("_prev_alternate", None)
+        if (old_alt or None) != (alt or None):
+            AUDIT_RECORDS.append({"id": rid, "field": "alternate_contact_number", "old_value": mask_sensitive_value(old_alt), "new_value": mask_sensitive_value(alt), "changed_by": row.get("changed_by", "etl_pipeline"), "channel": row.get("channel", "unknown"), "changed_at": pd.Timestamp.utcnow()})
+        clean = {c: row.get(c) for c in TARGET_COLS}
+        clean["primary_contact_number"] = mask_sensitive_value(primary)
+        clean["alternate_contact_number"] = mask_sensitive_value(alt)
+        clean["email"] = mask_sensitive_value(row.get("email"), 6)
+        clean["processed_at"] = pd.Timestamp.utcnow()
+        out.append(clean)
     return out
+
+
+def parse_payload(p):
+    if p is None:
+        return {}
+    return json.loads(p) if isinstance(p, str) else dict(p)
 
 
 def run_pipeline():
     con = duckdb.connect(str(DB_PATH))
     con.execute("CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR, ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);")
-    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR, aadhaar_no VARCHAR, aadhaar_masked VARCHAR, credit_score INTEGER, monthly_income DOUBLE, credit_history VARCHAR, risk_index DOUBLE, status VARCHAR, error_code VARCHAR, transformed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    con.execute("CREATE TABLE IF NOT EXISTS customer_master (id VARCHAR, aadhaar_no VARCHAR, credit_score INTEGER, risk_index DOUBLE, loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    con.execute("CREATE TABLE IF NOT EXISTS quarantine_ui (id VARCHAR, aadhaar_masked VARCHAR, error_code VARCHAR, quarantined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    rows = con.execute("SELECT id, payload FROM landing_ui").fetchall()
+    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR, customer_name VARCHAR, email VARCHAR, primary_contact_number VARCHAR, alternate_contact_number VARCHAR, channel VARCHAR, changed_by VARCHAR, processed_at TIMESTAMP);")
+    con.execute("CREATE TABLE IF NOT EXISTS audit_log (id VARCHAR, field VARCHAR, old_value VARCHAR, new_value VARCHAR, changed_by VARCHAR, channel VARCHAR, changed_at TIMESTAMP);")
+    con.execute("CREATE TABLE IF NOT EXISTS dq_exceptions (id VARCHAR, field VARCHAR, value VARCHAR, rule VARCHAR, logged_at TIMESTAMP);")
+    con.execute("UPDATE staging_ui SET alternate_contact_number = NULL WHERE alternate_contact_number = '';")
+    landing = con.execute("SELECT id, CAST(payload AS VARCHAR) AS payload FROM landing_ui ORDER BY ingested_at;").fetchdf()
+    prev = dict(con.execute("SELECT id, alternate_contact_number FROM staging_ui;").fetchall())
     raw_records = []
-    for rid, payload in rows:
-        data = json.loads(payload) if isinstance(payload, str) else (payload or {})
-        data.setdefault("id", rid)
-        raw_records.append(data)
+    for _, r in landing.iterrows():
+        rec = parse_payload(r["payload"])
+        rec.setdefault("id", r["id"])
+        rec["_prev_alternate"] = prev.get(rec["id"])
+        raw_records.append(rec)
     transformed = transform_batch(raw_records)
-    if not transformed:
-        print("landing_ui empty; nothing to transform")
-        con.close()
-        return
-    df = pd.DataFrame(transformed, columns=STG_COLS)
-    con.register("stg_df", df)
-    con.execute("INSERT INTO staging_ui (id, aadhaar_no, aadhaar_masked, credit_score, monthly_income, credit_history, risk_index, status, error_code) SELECT id, aadhaar_no, aadhaar_masked, TRY_CAST(credit_score AS INTEGER), TRY_CAST(monthly_income AS DOUBLE), credit_history, risk_index, status, error_code FROM stg_df")
-    con.execute("INSERT INTO customer_master (id, aadhaar_no, credit_score, risk_index) SELECT id, aadhaar_no, TRY_CAST(credit_score AS INTEGER), risk_index FROM stg_df WHERE status = 'ok'")
-    con.execute("INSERT INTO quarantine_ui (id, aadhaar_masked, error_code) SELECT id, aadhaar_masked, error_code FROM stg_df WHERE status = 'rejected'")
-    con.unregister("stg_df")
-    ok = int((df["status"] == "ok").sum())
-    rejected = len(df) - ok
-    for r in transformed[:5]:
-        print(f"id={r['id']} aadhaar={r['aadhaar_masked']} score={r['credit_score']} risk={r['risk_index']} status={r['status']} err={r['error_code']}")
-    print(f"Summary: read={len(rows)} staged={len(df)} loaded_customer_master={ok} quarantined={rejected}")
+    if transformed:
+        df = pd.DataFrame(transformed, columns=TARGET_COLS)
+        con.register("staging_df", df)
+        con.execute("DELETE FROM staging_ui WHERE id IN (SELECT id FROM staging_df);")
+        con.execute("INSERT INTO staging_ui SELECT * FROM staging_df;")
+    if AUDIT_RECORDS:
+        con.register("audit_df", pd.DataFrame(AUDIT_RECORDS))
+        con.execute("INSERT INTO audit_log SELECT * FROM audit_df;")
+    if DQ_EXCEPTIONS:
+        con.register("dq_df", pd.DataFrame(DQ_EXCEPTIONS))
+        con.execute("INSERT INTO dq_exceptions SELECT * FROM dq_df;")
+    total = con.execute("SELECT COUNT(*) FROM staging_ui;").fetchone()[0]
     con.close()
+    print(f"landing_rows={len(landing)} transformed={len(transformed)} audit_records={len(AUDIT_RECORDS)} dq_exceptions={len(DQ_EXCEPTIONS)} staging_total={total}")
 
 
 if __name__ == "__main__":
-    assert mask_sensitive_value("1234 5678 9012") == "XXXX-XXXX-9012"
-    assert sanitize_aadhaar("1234-5678-901")[1] == "E002_INVALID_AADHAAR_FORMAT"
-    assert normalize_credit_score(950)[0] == 900 and compute_risk_index(10000, "poor") == 80.0
     run_pipeline()

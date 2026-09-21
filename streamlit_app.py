@@ -1,24 +1,11 @@
 import re
 import json
-from typing import Optional
-
 import streamlit as st
 import requests
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"
 
-AADHAAR_PATTERN = re.compile(r"^\d{12}$")
-PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
-CREDIT_SCORE_MIN = 300
-CREDIT_SCORE_MAX = 900
 
-
-# ---------------------------------------------------------------------------
-# Backend helper
-# ---------------------------------------------------------------------------
 def submit_to_pipeline(form_data: dict) -> dict:
     try:
         resp = requests.post(API_INGEST_URL, json=form_data, timeout=10)
@@ -28,213 +15,142 @@ def submit_to_pipeline(form_data: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Formatting / validation helpers (unit-testable)
+# Regex-based display formatting helpers for Indian identifiers.
+# NOTE: These are purely cosmetic formatters (spacing / upper-casing) and do
+# NOT perform validation, rejection, or masking. Aadhaar / PAN fields are out
+# of scope for the KYC Initial Intake form per the BRD, so these helpers are
+# only applied if such keys ever appear in the payload (future-proofing).
 # ---------------------------------------------------------------------------
-def sanitize_digits(value: str, max_len: int) -> str:
-    """Strip all non-digit characters and truncate to max_len."""
-    return re.sub(r"\D", "", value or "")[:max_len]
+AADHAAR_GROUP_RE = re.compile(r"(\d{4})(?=\d)")
+NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]")
+NON_DIGIT_RE = re.compile(r"\D")
+
+# Alternate Contact Number validation (client-side, per change request):
+# numeric only + standard 10-digit mobile number length.
+MOBILE_NUMBER_RE = re.compile(r"^\d{10}$")
+NUMERIC_ONLY_RE = re.compile(r"^\d+$")
+
+CHANNELS = ["Internet Banking", "Mobile App", "Branch/CSR Portal"]
+
+
+def format_aadhaar(value: str) -> str:
+    digits = NON_DIGIT_RE.sub("", str(value or ""))
+    return AADHAAR_GROUP_RE.sub(r"\1 ", digits).strip()
 
 
 def format_pan(value: str) -> str:
-    """Uppercase alphanumeric PAN, max 10 chars."""
-    return re.sub(r"[^A-Za-z0-9]", "", value or "").upper()[:10]
+    return NON_ALNUM_RE.sub("", str(value or "")).upper()
 
 
-def validate_aadhaar(value: str) -> Optional[str]:
-    """Return an error message if Aadhaar is invalid, else None."""
-    if not value:
-        return "Aadhaar number is required."
-    if not AADHAAR_PATTERN.fullmatch(value):
-        return "Aadhaar number must be exactly 12 digits."
-    return None
+def apply_identifier_formatting(payload: dict) -> dict:
+    formatted = dict(payload)
+    if "aadhaar" in formatted:
+        formatted["aadhaar"] = format_aadhaar(formatted["aadhaar"])
+    if "pan" in formatted:
+        formatted["pan"] = format_pan(formatted["pan"])
+    return formatted
 
 
-def validate_pan(value: str) -> Optional[str]:
-    """Return an error message if PAN is invalid, else None (PAN optional)."""
-    if not value:
-        return None
-    if not PAN_PATTERN.fullmatch(value):
-        return "PAN must match format AAAAA9999A (5 letters, 4 digits, 1 letter)."
-    return None
+def validate_alternate_contact(alternate: str, primary: int) -> str:
+    """Return an inline error message, or empty string if valid.
 
-
-def normalize_credit_score(raw) -> Optional[int]:
-    """Coerce API credit_score to int within 300-900, else None."""
-    try:
-        score = int(raw)
-    except (TypeError, ValueError):
-        return None
-    if CREDIT_SCORE_MIN <= score <= CREDIT_SCORE_MAX:
-        return score
-    return None
-
-
-def extract_credit_score(result: dict) -> Optional[int]:
-    """Look for credit_score at top-level or under a 'data' key."""
-    if not isinstance(result, dict):
-        return None
-    if "credit_score" in result:
-        return normalize_credit_score(result.get("credit_score"))
-    data = result.get("data")
-    if isinstance(data, dict) and "credit_score" in data:
-        return normalize_credit_score(data.get("credit_score"))
-    return None
+    The field is optional: a blank value is always accepted.
+    """
+    alt = (alternate or "").strip()
+    if alt == "":
+        return ""
+    if not NUMERIC_ONLY_RE.match(alt):
+        return "Alternate Contact Number must contain digits only (no spaces, +, or dashes)."
+    if not MOBILE_NUMBER_RE.match(alt):
+        return "Alternate Contact Number must be a standard 10-digit mobile number."
+    if primary and alt == str(int(primary)):
+        return "Alternate Contact Number must not be the same as the Primary Contact Number."
+    return ""
 
 
 # ---------------------------------------------------------------------------
-# Session state
+# UI
 # ---------------------------------------------------------------------------
-if "aadhaar_no" not in st.session_state:
-    st.session_state.aadhaar_no = ""
-if "pan_no" not in st.session_state:
-    st.session_state.pan_no = ""
-if "credit_score" not in st.session_state:
-    st.session_state.credit_score = None
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-
-
-def _on_aadhaar_change():
-    st.session_state.aadhaar_no = sanitize_digits(st.session_state.aadhaar_no, 12)
-
-
-def _on_pan_change():
-    st.session_state.pan_no = format_pan(st.session_state.pan_no)
-
-
-# ---------------------------------------------------------------------------
-# Page
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Customer KYC Registration", page_icon="🪪", layout="centered")
-st.title("Customer KYC Registration")
-st.caption("Fields marked * are mandatory. Identity fields validate in real time.")
-
-# --- Identity documents (outside the form so validation is real-time) -------
-st.subheader("Identity Documents")
-
-st.text_input(
-    "Aadhaar Number *",
-    key="aadhaar_no",
-    max_chars=12,
-    placeholder="Enter 12-digit Aadhaar number",
-    help="Exactly 12 numeric digits (regex ^\\d{12}$).",
-    on_change=_on_aadhaar_change,
+st.set_page_config(page_title="Customer KYC Updates", page_icon="\U0001F4CB", layout="centered")
+st.title("Customer KYC Updates")
+st.subheader("KYC Initial Intake")
+st.caption(
+    "Per BRD, core intake values are captured as entered and posted raw to the ETL ingestion "
+    "endpoint. Client-side validation applies only to the optional Alternate Contact Number field."
 )
-aadhaar_error = validate_aadhaar(st.session_state.aadhaar_no)
-if st.session_state.aadhaar_no:
-    if aadhaar_error:
-        st.error(aadhaar_error, icon="⚠️")
-    else:
-        st.caption("✅ Aadhaar format valid")
 
-st.text_input(
-    "PAN Number",
-    key="pan_no",
-    max_chars=10,
-    placeholder="ABCDE1234F",
-    help="Format: 5 letters, 4 digits, 1 letter. Auto-uppercased.",
-    on_change=_on_pan_change,
-)
-pan_error = validate_pan(st.session_state.pan_no)
-if st.session_state.pan_no:
-    if pan_error:
-        st.error(pan_error, icon="⚠️")
-    else:
-        st.caption("✅ PAN format valid")
+if "customer_profile" not in st.session_state:
+    st.session_state["customer_profile"] = None
 
-# --- Main KYC form ----------------------------------------------------------
-with st.form("kyc_form", clear_on_submit=False):
-    st.subheader("Personal Details")
-    full_name = st.text_input("Full Name *", placeholder="As per Aadhaar")
-    col1, col2 = st.columns(2)
-    with col1:
-        dob = st.date_input("Date of Birth *")
-    with col2:
-        mobile = st.text_input("Mobile Number *", max_chars=10, placeholder="10-digit mobile")
-    email = st.text_input("Email", placeholder="name@example.com")
-    address = st.text_area("Residential Address *")
+channel = st.radio("Channel", CHANNELS, horizontal=True, help="Field renders identically on all three channels.")
 
-    st.subheader("Bureau Assessment")
-    credit_score_value = st.session_state.credit_score
-    credit_display = str(credit_score_value) if credit_score_value is not None else "Not yet calculated"
-    st.text_input(
-        "Calculated Credit Score",
-        value=credit_display,
-        disabled=True,
-        help="Bureau-derived credit score (300-900) returned by the backend API. Read-only.",
+with st.form("kyc_form"):
+    full_name = st.text_input("Full Name")
+    phone_number = st.number_input("Phone Number (Primary Contact)", min_value=0, step=1, format="%d", value=0)
+    alternate_contact = st.text_input(
+        "Alternate Contact Number (optional)",
+        max_chars=15,
+        placeholder="10-digit mobile number",
+        help="Optional. Digits only, 10 digits, and must differ from the Primary Contact Number.",
     )
-    if credit_score_value is not None:
-        st.progress(
-            (credit_score_value - CREDIT_SCORE_MIN) / (CREDIT_SCORE_MAX - CREDIT_SCORE_MIN),
-            text=f"Credit score {credit_score_value} / {CREDIT_SCORE_MAX}",
-        )
+    alt_error_slot = st.empty()
+    ssn = st.text_input("SSN")
+    submitted = st.form_submit_button("Submit")
 
-    submitted = st.form_submit_button("Submit KYC", type="primary", use_container_width=True)
-
-# --- Submission handling ----------------------------------------------------
 if submitted:
-    errors = []
-    if aadhaar_error:
-        errors.append(aadhaar_error)
-    if pan_error:
-        errors.append(pan_error)
-    if not full_name.strip():
-        errors.append("Full Name is required.")
-    mobile_clean = sanitize_digits(mobile, 10)
-    if not re.fullmatch(r"^[6-9]\d{9}$", mobile_clean):
-        errors.append("Mobile number must be 10 digits starting with 6-9.")
-    if email.strip() and not re.fullmatch(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()):
-        errors.append("Email address is not valid.")
-    if not address.strip():
-        errors.append("Residential Address is required.")
+    alt_error = validate_alternate_contact(alternate_contact, int(phone_number))
 
-    if errors:
-        st.error("Submission blocked. Please fix the following:")
-        for err in errors:
-            st.markdown(f"- {err}")
+    if alt_error:
+        alt_error_slot.error(alt_error)
+        st.error("Please correct the highlighted field and resubmit.")
     else:
         form_data = {
-            "full_name": full_name.strip(),
-            "dob": dob.isoformat(),
-            "mobile": mobile_clean,
-            "email": email.strip(),
-            "address": address.strip(),
-            "aadhaar_no": st.session_state.aadhaar_no,
-            "pan_no": st.session_state.pan_no,
-            "form_type": "customer_kyc",
+            "channel": channel,
+            "full_name": full_name,
+            "phone_number": int(phone_number),
+            "alternate_contact_number": (alternate_contact or "").strip(),
+            "ssn": ssn,
         }
+        form_data = apply_identifier_formatting(form_data)
+
         with st.spinner("Submitting to ingestion pipeline..."):
             result = submit_to_pipeline(form_data)
 
-        score = extract_credit_score(result)
-        if score is not None:
-            st.session_state.credit_score = score
-        st.session_state.last_result = result
-        st.rerun()
+        status = str(result.get("status", "")).lower() if isinstance(result, dict) else ""
+        message = result.get("message", "") if isinstance(result, dict) else str(result)
 
-# --- Render last API result -------------------------------------------------
-result = st.session_state.last_result
-if result is not None:
-    status = str(result.get("status", "")).lower() if isinstance(result, dict) else ""
-    message = result.get("message", "") if isinstance(result, dict) else str(result)
+        if status == "success":
+            st.success(message or "KYC intake submitted successfully.")
+            st.session_state["customer_profile"] = form_data
+        elif status == "requires_pipeline":
+            st.info(message or "Submission accepted and queued for downstream pipeline processing.")
+            st.session_state["customer_profile"] = form_data
+        elif status == "requires_human_review":
+            st.warning(message or "Submission received and flagged for human review.")
+            st.session_state["customer_profile"] = form_data
+        elif status == "error":
+            st.error(message or "An error occurred while submitting the KYC intake.")
+        else:
+            st.info(f"Response received from ingestion endpoint (status: '{status or 'unknown'}').")
 
-    if status == "success":
-        st.success(message or "KYC submitted successfully.", icon="✅")
-    elif status == "requires_pipeline":
-        st.info(message or "Submission accepted and queued for pipeline processing.", icon="⏳")
-    elif status == "requires_human_review":
-        st.warning(message or "Submission flagged for human review.", icon="👀")
-    elif status == "error":
-        st.error(message or "An error occurred during ingestion.", icon="❌")
-    else:
-        st.warning(f"Unexpected response from API: {json.dumps(result, default=str)}")
+        with st.expander("Submitted payload"):
+            st.code(json.dumps(form_data, indent=2), language="json")
+        with st.expander("Raw endpoint response"):
+            st.code(json.dumps(result, indent=2, default=str), language="json")
 
-    if st.session_state.credit_score is not None:
-        st.metric("Calculated Credit Score", st.session_state.credit_score)
-
-    with st.expander("Raw API response"):
-        st.json(result)
-
-    if st.button("Clear result"):
-        st.session_state.last_result = None
-        st.rerun()
+# ---------------------------------------------------------------------------
+# Customer Profile View (read-only)
+# ---------------------------------------------------------------------------
+profile = st.session_state.get("customer_profile")
+if profile:
+    st.divider()
+    st.subheader("Customer Profile View")
+    st.caption(f"Last saved via {profile.get('channel', 'unknown')} channel. All fields are read-only.")
+    st.text_input("Full Name", value=str(profile.get("full_name", "")), disabled=True, key="view_full_name")
+    st.text_input("Primary Contact Number", value=str(profile.get("phone_number", "")), disabled=True, key="view_phone")
+    st.text_input(
+        "Alternate Contact Number",
+        value=profile.get("alternate_contact_number") or "Not provided",
+        disabled=True,
+        key="view_alt_contact",
+    )
