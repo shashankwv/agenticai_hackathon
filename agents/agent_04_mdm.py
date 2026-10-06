@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import duckdb
 from langchain_core.prompts import ChatPromptTemplate
 import psycopg2
+import sqlparse
 from psycopg2 import sql
 from pydantic import BaseModel, Field
 import requests
@@ -78,7 +79,7 @@ def fetch_existing_customer_master_schema(db_uri: str = None) -> list[tuple[str,
     source of truth, not whatever was locally cached from a previous run."""
     connection_string = db_uri or os.getenv(
         "POSTGRES_CONNECTION_URI",
-        "postgresql://postgres:postgres@localhost:5432/mdm_db",
+        "postgresql://postgres:postgres@localhost:5432/mdm",
     )
     try:
         conn = psycopg2.connect(connection_string, connect_timeout=5)
@@ -94,6 +95,26 @@ def fetch_existing_customer_master_schema(db_uri: str = None) -> list[tuple[str,
         return rows
     except Exception:
         return []
+
+
+def fetch_sample_cleansed_record() -> dict:
+    """Returns one validated row from the ETL's DuckDB staging table (minus
+    pipeline bookkeeping columns), or {} if the ETL hasn't produced one yet."""
+    etl_db = Path(__file__).resolve().parent.parent / "etl" / "etl.duckdb"
+    try:
+        con = duckdb.connect(str(etl_db), read_only=True)
+        try:
+            df = con.execute(
+                "SELECT * FROM staging_ui WHERE dq_status = 'valid' LIMIT 1"
+            ).fetchdf()
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    record = df.iloc[0].to_dict()
+    return {k: v for k, v in record.items() if k not in ("id", "dq_status", "dq_reason")}
 
 
 def generate_production_ddl(
@@ -115,8 +136,12 @@ The `public.customer_master` table ALREADY EXISTS in production with these colum
 
 This is LIVE data — do not lose it. Generate ONLY
 `ALTER TABLE public.customer_master ADD COLUMN IF NOT EXISTS <col> <type>;`
-statements for fields in the sample payload below that are NOT already in
-the list above. If every field already exists, return a single harmless
+statements for fields that the Jira specification requires (or that appear
+in the sample payload below) and that are NOT already in the list above.
+The Jira specification is the primary source of required fields; the sample
+payload may be empty. Treat an existing column as covering a field only if it
+holds the same business attribute (e.g. `gov_id_ssn` covers `ssn`).
+If every required field already exists, return a single harmless
 no-op comment line (e.g. `-- No new columns required.`) and nothing else.
 Do NOT generate a CREATE TABLE statement, and do NOT reference dropping,
 renaming, or retyping any existing column.
@@ -154,6 +179,9 @@ Requirements:
    executable statement.
 5. Provide inline SQL comments (`--`) explaining schema design decisions.
 6. Return raw SQL script only without markdown code fences.
+7. Do NOT create, alter, index, comment on, or grant permissions for any
+    staging table such as `public.customer_master_stg`. The KYC ingestion
+    pipeline uses DuckDB for staging; Agent 04 owns only `public.customer_master`.
 """
 
     response: MDMDDLResponse = structured_llm.invoke(prompt)
@@ -172,7 +200,7 @@ def validate_ddl_syntax(ddl_sql: str) -> dict:
     conn = duckdb.connect(":memory:")
     try:
         # Extract CREATE TABLE statements for syntactic dry-run validation
-        statements = [stmt.strip() for stmt in ddl_sql.split(";") if stmt.strip()]
+        statements = [stmt.strip() for stmt in sqlparse.split(ddl_sql) if stmt.strip()]
         for stmt in statements:
             if "CREATE TABLE" in stmt.upper():
                 # Convert PostgreSQL specific types to standard types for dry-run parsing
@@ -206,7 +234,7 @@ def ensure_postgres_running(container_name: str = "mdm-postgres") -> bool:
   """
   try:
     conn = psycopg2.connect(
-        os.getenv("POSTGRES_CONNECTION_URI", "postgresql://postgres:postgres@localhost:5432/mdm_db"),
+        os.getenv("POSTGRES_CONNECTION_URI", "postgresql://postgres:postgres@localhost:5432/mdm"),
         connect_timeout=3,
     )
     conn.close()
@@ -252,7 +280,7 @@ def ensure_postgres_running(container_name: str = "mdm-postgres") -> bool:
           f" '{container_name}' not found. Spawning new PostgreSQL container..."
       )
       run_cmd = (
-          f"docker run --name {container_name} -e POSTGRES_DB=mdm_db -e"
+          f"docker run --name {container_name} -e POSTGRES_DB=mdm -e"
           " POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -p 5432:5432"
           " -d postgres:latest"
       )
@@ -266,7 +294,7 @@ def ensure_postgres_running(container_name: str = "mdm-postgres") -> bool:
       time.sleep(1)
       try:
         conn = psycopg2.connect(
-            "postgresql://postgres:postgres@localhost:5432/mdm_db"
+            "postgresql://postgres:postgres@localhost:5432/mdm"
         )
         conn.close()
         print(
@@ -298,50 +326,45 @@ def execute_mdm_on_postgres(
 
   connection_string = db_uri or os.getenv(
       "POSTGRES_CONNECTION_URI",
-      "postgresql://postgres:postgres@localhost:5432/mdm_db",
+    "postgresql://postgres:postgres@localhost:5432/mdm",
   )
 
   for attempt in range(2):
     try:
-      conn = psycopg2.connect(connection_string)
-      conn.autocommit = True
-      cursor = conn.cursor()
+            conn = psycopg2.connect(connection_string)
+            conn.autocommit = True
+            cursor = conn.cursor()
 
-      statements = [stmt.strip() for stmt in ddl_sql.split(";") if stmt.strip()]
-      # This script is meant to be schema-only. The LLM prompt tells it not
-      # to include sample INSERT/UPDATE/DELETE statements, but free-tier
-      # models don't always comply — skip any DML defensively so an
-      # "example" statement can never run for real against live data. Strip
-      # full `-- ...` comment LINES first (not just leading dash characters),
-      # since a real statement is often preceded by several lines of
-      # descriptive comments that would otherwise defeat a prefix check.
-      dml_prefixes = ("insert ", "update ", "delete ", "select ", "truncate ")
-      def _is_dml(stmt: str) -> bool:
-        code_only = re.sub(r"(?m)^\s*--.*$", "", stmt).strip().lower()
-        return code_only.startswith(dml_prefixes)
-      statements = [stmt for stmt in statements if not _is_dml(stmt)]
-      # The prompt also asks for `CREATE TABLE IF NOT EXISTS`, but free-tier
-      # models don't reliably include it — enforce it here so re-running
-      # this script against a database that already has the table doesn't
-      # hard-fail with "relation already exists".
-      statements = [
-          re.sub(
-              r"(?im)^(\s*)CREATE TABLE (?!IF NOT EXISTS)",
-              r"\1CREATE TABLE IF NOT EXISTS ",
-              stmt,
-          )
-          for stmt in statements
-      ]
-      executed_count = 0
+            statements = [stmt.strip() for stmt in sqlparse.split(ddl_sql) if stmt.strip()]
+            dml_prefixes = ("insert ", "update ", "delete ", "select ", "truncate ")
 
-      for statement in statements:
-        cursor.execute(statement)
-        executed_count += 1
+            def _is_dml(stmt: str) -> bool:
+                code_only = re.sub(r"(?m)^\s*--.*$", "", stmt).strip().lower()
+                return code_only.startswith(dml_prefixes)
 
-      cursor.close()
-      conn.close()
+            statements = [
+                    stmt
+                    for stmt in statements
+                    if re.sub(r"(?m)^\s*--.*$", "", stmt).strip() and not _is_dml(stmt)
+            ]
+            statements = [
+                    re.sub(
+                            r"(?im)^(\s*)CREATE TABLE (?!IF NOT EXISTS)",
+                            r"\1CREATE TABLE IF NOT EXISTS ",
+                            stmt,
+                    )
+                    for stmt in statements
+            ]
+            executed_count = 0
 
-      return {
+            for statement in statements:
+                cursor.execute(statement)
+                executed_count += 1
+
+            cursor.close()
+            conn.close()
+
+            return {
           "status": "SUCCESS",
           "message": (
               f"Successfully executed {executed_count} SQL statements on"
@@ -406,7 +429,7 @@ def upsert_golden_record(
 
     connection_string = db_uri or os.getenv(
         "POSTGRES_CONNECTION_URI",
-        "postgresql://postgres:postgres@localhost:5432/mdm_db",
+        "postgresql://postgres:postgres@localhost:5432/mdm",
     )
     is_local_target = "localhost" in connection_string or "127.0.0.1" in connection_string
 
@@ -494,7 +517,30 @@ def upsert_golden_record(
 # Step 6: MDM Agent Execution Orchestrator
 # ==========================================
 
-def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, execute_live: bool = False) -> ProjectState:
+def drop_customer_master(db_uri: str = None) -> None:
+    """Drop Agent 04's master and staging tables for Start Fresh."""
+    connection_string = db_uri or os.getenv(
+        "POSTGRES_CONNECTION_URI",
+        "postgresql://postgres:postgres@localhost:5432/mdm",
+    )
+    conn = psycopg2.connect(connection_string, connect_timeout=5)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "DROP TABLE IF EXISTS public.customer_master_stg, "
+                "public.customer_master CASCADE"
+            )
+    finally:
+        conn.close()
+
+
+def run_mdm_agent_autonomous(
+    state: ProjectState,
+    sample_record: dict = None,
+    execute_live: bool = False,
+    reset: bool = False,
+) -> ProjectState:
     """
     Autonomous Agent 04 Orchestrator:
     1. Fetch MDM details from Jira (Step 01)
@@ -502,23 +548,32 @@ def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, ex
     3. Save output/mdm/schema.sql artifact
     4. Dry-run validation via DuckDB parser (Step 03)
     5. Live target schema execution via PostgreSQL driver (Step 04)
+
+    ``reset=True`` drops the live table before generation, but only when
+    ``execute_live=True``. Otherwise the run remains generation-only.
     """
     print("--- Running Autonomous Agent 04 (MDM Engine) ---")
 
-    jira_spec = ""
-    if getattr(state, "jira_mdm_issue_key", None):
-        jira_spec = fetch_mdm_jira_issue(state.jira_mdm_issue_key)
-    if not jira_spec:
-        jira_spec = "Generate production master table schema for customer KYC records with risk scoring."
+    if reset and execute_live:
+        print("[Agent 04] Start Fresh requested - dropping public.customer_master.")
+        drop_customer_master()
+        state.mdm_ddl = ""
 
-    sample_payload = sample_record or getattr(state, "sample_cleansed_output", {
-        "full_name": "Ananya Sharma",
-        "pan_number": "ABCDE1234F",
-        "masked_aadhaar": "XXXX-XXXX-1098",
-        "monthly_income": 85000.0,
-        "credit_score": 765,
-        "risk_index": 22.5
-    })
+    jira_issue_key = getattr(state, "jira_mdm_issue_key", None)
+    if not jira_issue_key:
+        raise ValueError("Agent 04 requires a Jira MDM story key; no fallback requirement is used.")
+
+    jira_spec = fetch_mdm_jira_issue(jira_issue_key)
+    if not jira_spec.strip():
+        raise ValueError(f"Agent 04 could not load Jira MDM story '{jira_issue_key}'.")
+
+    # state.sample_cleansed_output defaults to None, so fall through explicitly
+    # rather than relying on getattr's default (which never triggers).
+    sample_payload = (
+        sample_record
+        or getattr(state, "sample_cleansed_output", None)
+        or fetch_sample_cleansed_record()
+    )
 
     try:
         # Step 02: Code Generation — check the LIVE table's actual current
@@ -551,6 +606,10 @@ def run_mdm_agent_autonomous(state: ProjectState, sample_record: dict = None, ex
             print("[4/4] Running Step 04 (Live PostgreSQL Target Execution)...")
             exec_result = execute_mdm_on_postgres(ddl_sql)
             print(f"      Execution: {exec_result['status']} | {exec_result.get('message') or exec_result.get('error')}")
+            if exec_result.get("status") != "SUCCESS":
+                state.errors.append(
+                    f"Agent 04 PostgreSQL execution failed: {exec_result.get('error') or exec_result.get('message')}"
+                )
 
     except Exception as e:
         error_msg = f"Autonomous Agent 04 Error: {str(e)}"

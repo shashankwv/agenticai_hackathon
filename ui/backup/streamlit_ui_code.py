@@ -3,17 +3,20 @@ import json
 import streamlit as st
 import requests
 
+# ---------------------------------------------------------------------------
+# Customer KYC Updates - KYC Initial Intake Form
+# Per BRD: NO client-side validations (no required checks, format masks,
+# length limits, or regex) EXCEPT where explicitly required by the Jira story.
+# Jira story: 'Marital Status' radio group is MANDATORY - block Submit and
+# display an inline required-field error until one option is selected.
+# Raw payload is POSTed to the ETL intake endpoint.
+# Out of scope: document upload, email/address fields, IDV API calls.
+# ---------------------------------------------------------------------------
+
 API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"
 
-# ---------------------------------------------------------------------------
-# Validation / formatting helpers (unit-testable, pure functions)
-# ---------------------------------------------------------------------------
-AADHAAR_PATTERN = re.compile(r"^\d{12}$")
-PAN_PATTERN = re.compile(r"^[A-Z]{5}[0-9]{4}[A-Z]$")
-AADHAAR_ERROR = "Aadhaar Number must be exactly 12 digits"
-PAN_ERROR = "PAN must be 10 characters in the format AAAAA9999A"
-CREDIT_SCORE_MIN = 300
-CREDIT_SCORE_MAX = 900
+MARITAL_STATUS_OPTIONS = ["Single", "Married", "Divorced", "Widowed"]
+MARITAL_STATUS_REQUIRED_MSG = "Marital Status is required. Please select one option."
 
 
 def submit_to_pipeline(form_data: dict) -> dict:
@@ -21,157 +24,114 @@ def submit_to_pipeline(form_data: dict) -> dict:
         resp = requests.post(API_INGEST_URL, json=form_data, timeout=10)
         return resp.json()
     except Exception as e:
-        return {"status": "error", "message": f"Ingestion offline: {e}"}
+        return {"status": "error", "message": f"Ingestion server offline (Port 8000). Please start api_bridge.py: {e}"}
 
 
-def format_aadhaar(value) -> str:
-    """Restrict Aadhaar input to numeric characters and enforce maxLength=12."""
-    return re.sub(r"\D", "", str(value or ""))[:12]
-
-
-def validate_aadhaar(value) -> bool:
-    """True only when value matches ^\\d{12}$ (exactly 12 numeric digits)."""
-    return bool(AADHAAR_PATTERN.match(str(value or "")))
-
-
-def format_pan(value) -> str:
-    """Strip non-alphanumerics, upper-case and enforce maxLength=10 for PAN."""
-    return re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()[:10]
-
-
-def validate_pan(value) -> bool:
-    return bool(PAN_PATTERN.match(str(value or "")))
-
-
-def format_credit_score(score) -> str:
-    """Render bureau credit_score (300-900) or an N/A placeholder."""
-    try:
-        s = int(score)
-    except (TypeError, ValueError):
-        return "N/A"
-    if CREDIT_SCORE_MIN <= s <= CREDIT_SCORE_MAX:
-        return str(s)
-    return "N/A"
-
-
-def extract_credit_score(result) -> object:
-    """Pull credit_score out of a bureau/pipeline response payload if present."""
-    if not isinstance(result, dict):
-        return None
-    if result.get("credit_score") is not None:
-        return result.get("credit_score")
-    for key in ("data", "bureau_response", "bureau"):
-        nested = result.get(key)
-        if isinstance(nested, dict) and nested.get("credit_score") is not None:
-            return nested.get("credit_score")
+def validate_marital_status(marital_status) -> str | None:
+    """Return an error message if marital_status is not selected, else None.
+    Exposed as a plain function so it can be unit-tested."""
+    if marital_status is None or marital_status not in MARITAL_STATUS_OPTIONS:
+        return MARITAL_STATUS_REQUIRED_MSG
     return None
 
 
-# ---------------------------------------------------------------------------
-# Page
-# ---------------------------------------------------------------------------
-st.set_page_config(page_title="Customer KYC Registration", layout="centered")
-st.title("Customer KYC Registration")
-st.caption("Complete the customer KYC details below. Fields marked * are mandatory.")
+def build_payload(full_name, phone_number, ssn, marital_status) -> dict:
+    """Build raw payload: {full_name, phone_number, ssn, marital_status}.
+    Exposed as a plain function so payload inclusion can be unit-tested."""
+    return {
+        "full_name": full_name,
+        "phone_number": int(phone_number) if phone_number is not None else None,
+        "ssn": ssn,
+        "marital_status": marital_status,
+    }
 
-if "credit_score" not in st.session_state:
-    st.session_state["credit_score"] = None
-if "last_result" not in st.session_state:
-    st.session_state["last_result"] = None
+
+st.set_page_config(page_title="KYC Initial Intake", page_icon="\U0001FAAA", layout="centered")
+
+st.title("Customer KYC Initial Intake")
+st.caption("Enter the customer's details below and click Submit to send the record to the ETL intake pipeline.")
 
 with st.form("kyc_form"):
-    st.subheader("Customer Details")
-    full_name = st.text_input("Full Name *", max_chars=100, placeholder="As per PAN card")
-    email = st.text_input("Email", placeholder="name@example.com")
-    mobile_raw = st.text_input("Mobile Number", max_chars=10, placeholder="10-digit mobile")
-    dob = st.date_input("Date of Birth")
-
-    st.subheader("Identity Documents")
-    pan_raw = st.text_input(
-        "PAN *",
-        max_chars=10,
-        placeholder="ABCDE1234F",
-        help="Format: 5 letters, 4 digits, 1 letter",
+    full_name = st.text_input("Full Name", placeholder="e.g. Jane Doe")
+    phone_number = st.number_input("Phone Number", value=0, step=1, format="%d")
+    ssn = st.text_input("SSN", placeholder="Social Security Number")
+    # Mandatory Marital Status radio group - positioned directly after SSN and above Submit.
+    # Default: none selected (index=None).
+    marital_status = st.radio(
+        "Marital Status *",
+        options=MARITAL_STATUS_OPTIONS,
+        index=None,
+        horizontal=True,
+        key="marital_status",
     )
-    aadhaar_raw = st.text_input(
-        "Aadhaar Number *",
-        key="aadhaar_no",
-        max_chars=12,
-        placeholder="Exactly 12 numeric digits",
-        help="Numeric characters only. Must match ^\\d{12}$",
-    )
-    # Inline hint mirroring the real-time rule (form re-validates on submit)
-    aadhaar_preview = format_aadhaar(aadhaar_raw)
-    if aadhaar_raw and not validate_aadhaar(aadhaar_preview):
-        st.markdown(f":red[{AADHAAR_ERROR}]")
-
-    st.subheader("Bureau Data")
-    st.text_input(
-        "Calculated Credit Score",
-        value=format_credit_score(st.session_state["credit_score"]),
-        disabled=True,
-        help="Read-only. Populated from bureau response field credit_score (300-900).",
-    )
-
-    submitted = st.form_submit_button("Submit KYC", type="primary")
+    # Inline placeholder for the required-field error, rendered directly beneath the radio group.
+    marital_status_error_slot = st.empty()
+    submitted = st.form_submit_button("Submit")
 
 if submitted:
-    aadhaar_no = format_aadhaar(aadhaar_raw)
-    pan_no = format_pan(pan_raw)
-    mobile = re.sub(r"\D", "", mobile_raw or "")[:10]
+    validation_error = validate_marital_status(marital_status)
 
-    errors = []
-    if not (full_name or "").strip():
-        errors.append("Full Name is required")
-    if not validate_pan(pan_no):
-        errors.append(PAN_ERROR)
-    if not validate_aadhaar(aadhaar_no):
-        errors.append(AADHAAR_ERROR)
-    if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
-        errors.append("Email address is not valid")
-    if mobile and not re.match(r"^\d{10}$", mobile):
-        errors.append("Mobile Number must be exactly 10 digits")
-
-    if errors:
-        # Block submission until all validations pass
-        for err in errors:
-            st.error(err)
+    if validation_error:
+        # Block submission and show inline required-field error.
+        marital_status_error_slot.error(validation_error, icon="\u26a0\ufe0f")
+        st.toast("Please select a Marital Status before submitting", icon="\u26a0\ufe0f")
     else:
-        form_data = {
-            "form": "customer_kyc",
-            "full_name": full_name.strip(),
-            "email": email.strip(),
-            "mobile": mobile,
-            "dob": dob.isoformat() if dob else None,
-            "pan_no": pan_no,
-            "aadhaar_no": aadhaar_no,
-        }
-        with st.spinner("Submitting KYC to ingestion pipeline..."):
+        # Build raw payload exactly as specified: {full_name, phone_number, ssn, marital_status}
+        form_data = build_payload(full_name, phone_number, ssn, marital_status)
+
+        with st.spinner("Submitting to ETL intake pipeline..."):
             result = submit_to_pipeline(form_data)
-
-        if not isinstance(result, dict):
-            result = {"status": "error", "message": f"Unexpected response: {result}"}
-
-        st.session_state["last_result"] = result
-        score = extract_credit_score(result)
-        if score is not None:
-            st.session_state["credit_score"] = score
 
         status = str(result.get("status", "")).lower()
         message = result.get("message", "")
 
         if status == "success":
-            st.success(f"KYC submitted successfully. {message}".strip())
+            st.success(message or "KYC record submitted successfully.")
+            st.toast("Submission successful", icon="\u2705")
         elif status == "requires_pipeline":
-            st.info(f"KYC accepted and queued for pipeline processing. {message}".strip())
+            st.info(message or "Submission accepted and queued for downstream pipeline processing.")
+            st.toast("Queued for pipeline", icon="\u2139\ufe0f")
         elif status == "requires_human_review":
-            st.warning(f"KYC submitted but requires human review. {message}".strip())
+            st.warning(message or "Submission accepted but flagged for human review.")
+            st.toast("Flagged for human review", icon="\u26a0\ufe0f")
         elif status == "error":
-            st.error(f"Submission failed: {message}")
+            st.error(message or "Submission failed. Please try again.")
+            st.toast("Submission failed", icon="\u274c")
         else:
-            st.info(f"Pipeline response: {json.dumps(result)}")
+            st.info(f"Unexpected response from intake endpoint: {json.dumps(result)}")
 
-        st.metric("Calculated Credit Score", format_credit_score(st.session_state["credit_score"]))
+        with st.expander("Raw server response"):
+            st.json(result)
 
-        with st.expander("Submitted payload & raw pipeline response"):
-            st.json({"request": form_data, "response": result})
+
+# ---------------------------------------------------------------------------
+# Unit tests (run with: python -m pytest <this_file>.py)
+# These cover the required-field validation and payload inclusion for
+# marital_status without needing a live Streamlit session or API server.
+# ---------------------------------------------------------------------------
+
+def test_marital_status_required_when_none():
+    assert validate_marital_status(None) == MARITAL_STATUS_REQUIRED_MSG
+
+
+def test_marital_status_required_when_invalid_option():
+    assert validate_marital_status("Unknown") == MARITAL_STATUS_REQUIRED_MSG
+
+
+def test_marital_status_valid_options_pass_validation():
+    for option in MARITAL_STATUS_OPTIONS:
+        assert validate_marital_status(option) is None
+
+
+def test_payload_includes_marital_status():
+    payload = build_payload("Jane Doe", 5551234567, "123-45-6789", "Married")
+    assert "marital_status" in payload
+    assert payload["marital_status"] == "Married"
+    assert payload["full_name"] == "Jane Doe"
+    assert payload["phone_number"] == 5551234567
+    assert payload["ssn"] == "123-45-6789"
+
+
+def test_payload_keys_exact():
+    payload = build_payload("", 0, "", "Single")
+    assert set(payload.keys()) == {"full_name", "phone_number", "ssn", "marital_status"}

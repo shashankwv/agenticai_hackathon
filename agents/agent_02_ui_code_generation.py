@@ -106,7 +106,7 @@ def submit_to_pipeline(form_data: dict) -> dict:
    - status 'success': `st.success(...)`
    - status 'requires_pipeline' or 'requires_human_review': `st.info(...)` or `st.warning(...)`
    - status 'error': `st.error(...)`
-6. Apply regex formatting for Aadhaar/PAN fields.
+6. Apply validation and formatting only for fields explicitly required by the Jira story.
 7. Return executable Python code wrapped ONLY inside valid structured JSON schema."""
 
     # Primary Attempt: Structured LLM Output
@@ -174,10 +174,13 @@ def run_ui_code_generation_agent(state: ProjectState, reset: bool = False) -> Pr
             UI_CODE_PATH.unlink()
             logger.info(f"Deleted active UI file: {UI_CODE_PATH}")
 
-    if getattr(state, "jira_ui_issue_key", None):
-        jira_spec = fetch_jira_ui_details(state.jira_ui_issue_key)
-    else:
-        jira_spec = getattr(state, "jira_ui_task", None) or "Create onboarding KYC form with name, email, phone, aadhaar_no, pan_no."
+    jira_issue_key = getattr(state, "jira_ui_issue_key", None)
+    if not jira_issue_key:
+        raise ValueError("Agent 02 requires a Jira UI story key; no fallback requirement is used.")
+
+    jira_spec = fetch_jira_ui_details(jira_issue_key)
+    if not jira_spec.strip():
+        raise ValueError(f"Agent 02 could not load Jira UI story '{jira_issue_key}'.")
 
     baseline_code = getattr(state, "ui_code", None) or None
     max_retries = 2

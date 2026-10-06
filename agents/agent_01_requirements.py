@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
-from pathlib import Path
 import re
 from pydantic import BaseModel, Field
 import requests
@@ -20,27 +19,32 @@ def clean_html(raw_html: str) -> str:
 
 
 def fetch_confluence_page(page_id: str = None) -> str:
-    """Fetches business requirements from Confluence or falls back to local markdown."""
+    """Fetch business requirements from the specified Confluence page."""
     base_url = os.getenv("ATLASSIAN_URL")
     email = os.getenv("ATLASSIAN_EMAIL")
     token = os.getenv("ATLASSIAN_API_TOKEN")
 
-    if not all([base_url, email, token]) or not page_id:
-        fallback_path = Path("templates/sample_confluence_spec.md")
-        if fallback_path.exists():
-            return fallback_path.read_text(encoding="utf-8")
-        return (
-            "Default Requirement: Add aadhaar_no as VARCHAR(12) required field for"
-            " KYC."
+    if not all([base_url, email, token]):
+        raise ValueError(
+            "Confluence credentials are required; no default requirement is used."
+        )
+    if not page_id:
+        raise ValueError(
+            "A Confluence page ID is required; no default requirement is used."
         )
 
     url = f"{base_url}/wiki/rest/api/content/{page_id}?expand=body.storage"
     response = requests.get(url, auth=HTTPBasicAuth(email, token))
     if response.status_code == 200:
         raw_val = response.json()["body"]["storage"]["value"]
-        return clean_html(raw_val)
-    else:
-        raise ConnectionError(f"Failed to fetch Confluence page: {response.text}")
+        content = clean_html(raw_val)
+        if not content:
+            raise ValueError(f"Confluence page '{page_id}' contains no requirement text.")
+        return content
+
+    raise ConnectionError(
+        f"Failed to fetch Confluence page '{page_id}': {response.text}"
+    )
 
 
 # ==========================================

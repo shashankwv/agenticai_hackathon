@@ -1,47 +1,32 @@
 import json
-import re
 import duckdb
 import pandas as pd
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "etl.duckdb"
-AADHAAR_RE = re.compile(r"^\d{12}$")
-STAGING_COLS = ["id", "aadhaar_masked", "monthly_income", "credit_history", "credit_score", "risk_index", "status"]
+ALLOWED_MARITAL = {"Single", "Married", "Divorced", "Widowed"}
+SENSITIVE_FIELDS = ("email", "phone", "national_id", "account_number")
+STAGING_COLUMNS = ["id", "ingested_at", "full_name", "email", "phone", "national_id", "account_number", "marital_status", "is_valid", "rejection_reason"]
+CREATE_LANDING = "CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR, ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);"
+CREATE_STAGING = "CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR, ingested_at TIMESTAMP, full_name VARCHAR, email VARCHAR, phone VARCHAR, national_id VARCHAR, account_number VARCHAR, marital_status VARCHAR, is_valid BOOLEAN, rejection_reason VARCHAR);"
 
 
 def mask_sensitive_value(val: str, keep_last: int = 4) -> str:
-    s = "" if val is None else str(val)
-    if not s:
-        return ""
-    tail = s[-keep_last:] if keep_last > 0 else ""
-    hidden = "X" * max(len(s) - len(tail), 0)
-    full = hidden + tail
-    groups = [full[i:i + 4] for i in range(0, len(full), 4)]
-    return "-".join(groups)
-
-
-def sanitize_aadhaar(raw) -> str | None:
-    if raw is None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
-    cleaned = re.sub(r"[\s\-]", "", str(raw))
-    return cleaned if AADHAAR_RE.match(cleaned) else None
+    s = str(val)
+    if len(s) <= keep_last:
+        return "*" * len(s)
+    return "*" * (len(s) - keep_last) + s[-keep_last:]
 
 
-def compute_risk_index(monthly_income, credit_history) -> int:
-    try:
-        income = float(monthly_income or 0)
-    except (TypeError, ValueError):
-        income = 0.0
-    score = 50
-    if income >= 100000:
-        score -= 20
-    elif income >= 50000:
-        score -= 10
-    elif income < 20000:
-        score += 15
-    history = str(credit_history or "none").strip().lower()
-    score += {"excellent": -25, "good": -15, "fair": 0, "poor": 25, "none": 10}.get(history, 10)
-    return max(0, min(100, score))
+def validate_marital_status(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)) or str(value).strip() == "":
+        return None, False, "marital_status is null (KYC mandatory)"
+    cleaned = str(value).strip().capitalize()
+    if cleaned not in ALLOWED_MARITAL:
+        return str(value), False, f"marital_status invalid: {value}"
+    return cleaned, True, None
 
 
 def transform_batch(raw_records: list[dict]) -> list[dict]:
@@ -53,46 +38,50 @@ def transform_batch(raw_records: list[dict]) -> list[dict]:
                 payload = json.loads(payload)
             except json.JSONDecodeError:
                 payload = {}
-        aadhaar = sanitize_aadhaar(payload.get("aadhaar_no"))
-        income = payload.get("monthly_income")
-        history = payload.get("credit_history")
-        try:
-            credit_score = int(payload.get("credit_score")) if payload.get("credit_score") is not None else None
-        except (TypeError, ValueError):
-            credit_score = None
-        row = {
-            "id": str(rec.get("id") or payload.get("id") or ""),
-            "aadhaar_masked": mask_sensitive_value(aadhaar) if aadhaar else None,
-            "monthly_income": float(income) if isinstance(income, (int, float)) else None,
-            "credit_history": str(history) if history is not None else None,
-            "credit_score": credit_score,
-            "risk_index": compute_risk_index(income, history),
-            "status": "ok" if aadhaar else "quarantined",
-        }
+        row = {"id": rec.get("id"), "ingested_at": rec.get("ingested_at")}
+        row["full_name"] = (str(payload.get("full_name") or "").strip()) or None
+        for field in SENSITIVE_FIELDS:
+            row[field] = mask_sensitive_value(payload.get(field))
+        marital, ok, reason = validate_marital_status(payload.get("marital_status"))
+        row["marital_status"] = marital
+        row["is_valid"] = ok
+        row["rejection_reason"] = reason
         out.append(row)
     return out
 
 
 def run_pipeline():
     con = duckdb.connect(str(DB_PATH))
-    con.execute("CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR, ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);")
-    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR, aadhaar_masked VARCHAR, monthly_income DOUBLE, credit_history VARCHAR, credit_score INTEGER, risk_index INTEGER, status VARCHAR, processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    raw_df = con.execute("SELECT id, CAST(payload AS VARCHAR) AS payload FROM landing_ui ORDER BY ingested_at").df()
-    raw_records = raw_df.to_dict(orient="records")
+    con.execute(CREATE_LANDING)
+    con.execute(CREATE_STAGING)
+    landing_df = con.execute("SELECT id, ingested_at, CAST(payload AS VARCHAR) AS payload FROM landing_ui").df()
+    raw_records = landing_df.to_dict(orient="records")
     transformed = transform_batch(raw_records)
-    staged_df = pd.DataFrame(transformed, columns=STAGING_COLS)
-    if not staged_df.empty:
-        con.register("staged_df", staged_df)
-        con.execute("INSERT INTO staging_ui (id, aadhaar_masked, monthly_income, credit_history, credit_score, risk_index, status) SELECT id, aadhaar_masked, monthly_income, credit_history, credit_score, risk_index, status FROM staged_df")
-        con.unregister("staged_df")
-    total = len(transformed)
-    quarantined = sum(1 for r in transformed if r["status"] == "quarantined")
-    print(f"landing_ui rows read: {total}")
-    print(f"staging_ui rows loaded: {total} (ok={total - quarantined}, quarantined={quarantined})")
-    for r in transformed[:5]:
-        print(f"id={r['id']} aadhaar={r['aadhaar_masked']} credit_score={r['credit_score']} risk_index={r['risk_index']} status={r['status']}")
+    staging_df = pd.DataFrame(transformed, columns=STAGING_COLUMNS)
+    staging_df["ingested_at"] = pd.to_datetime(staging_df["ingested_at"])
+    staging_df["is_valid"] = staging_df["is_valid"].astype(bool)
+    con.register("staging_df", staging_df)
+    con.execute("DELETE FROM staging_ui")
+    con.execute("INSERT INTO staging_ui SELECT * FROM staging_df")
+    con.unregister("staging_df")
+    total = len(staging_df)
+    valid = int(staging_df["is_valid"].sum()) if total else 0
+    staged = con.execute("SELECT COUNT(*) FROM staging_ui").fetchone()[0]
     con.close()
+    print(f"landing_ui rows: {total} | valid: {valid} | flagged: {total - valid} | staging_ui rows: {staged}")
+
+
+def run_tests():
+    cases = [({"marital_status": "Married"}, True), ({"marital_status": "single"}, True), ({"marital_status": None}, False), ({"marital_status": "Complicated"}, False), ({}, False)]
+    for payload, expected in cases:
+        result = transform_batch([{"id": "t", "payload": json.dumps(payload)}])[0]
+        assert result["is_valid"] is expected, result
+    assert transform_batch([{"id": "b", "payload": "{}"}])[0]["marital_status"] is None
+    assert mask_sensitive_value("123456789") == "*****6789"
+    assert mask_sensitive_value("12") == "**"
+    print("tests passed")
 
 
 if __name__ == "__main__":
+    run_tests()
     run_pipeline()

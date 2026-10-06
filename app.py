@@ -13,6 +13,10 @@ import pandas as pd
 import psycopg2
 import streamlit as st
 import streamlit.components.v1 as components
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
+
+load_dotenv()
 
 # ============================================================================
 # CONSOLIDATED AGENT IMPORTS
@@ -83,6 +87,8 @@ def ensure_ui_server_running(state_obj: ProjectState, max_retries: int = 3) -> b
         try:
             subprocess.Popen(
                 [
+                    sys.executable,
+                    "-m",
                     "streamlit",
                     "run",
                     str(UI_FILE_PATH.relative_to(PROJECT_ROOT)),
@@ -1067,7 +1073,13 @@ if run_phase_4:
         and st.session_state.execution_logs[-1]["level"] == "WARN"
     ):
         st.session_state.execution_logs.pop()
-    add_log(f"Agent 04 Complete (<b>Took {elapsed:.2f}s</b>). DB Updated.", "SUCCESS")
+    if state.errors and "Agent 04 PostgreSQL execution failed:" in state.errors[-1]:
+        add_log(
+            f"Agent 04 failed (<b>Took {elapsed:.2f}s</b>). Check the error log.",
+            "ERROR",
+        )
+    else:
+        add_log(f"Agent 04 Complete (<b>Took {elapsed:.2f}s</b>). DB Updated.", "SUCCESS")
     st.toast("Phase 4 Complete!")
     st.rerun()
 
@@ -1130,7 +1142,10 @@ with tab_a2:
                 add_log("UI Server Online.", "SUCCESS")
                 st.success("Server Online!")
             else:
-                st.error("Missing valid `ui_code` in state.")
+                if getattr(state, "ui_code", None):
+                    st.error("UI server failed to start on port 8502.")
+                else:
+                    st.error("Missing valid `ui_code` in state.")
 
     with col_u2:
         is_live = ensure_ui_server_running(state, max_retries=1)
@@ -1249,15 +1264,26 @@ with tab_a4:
         postgres_ready = ensure_postgres_running("mdm-postgres")
 
         if postgres_ready:
+            engine = None
             try:
-                conn = psycopg2.connect(
-                    "postgresql://postgres:postgres@localhost:5432/mdm_db"
+                postgres_uri = os.getenv(
+                    "POSTGRES_CONNECTION_URI",
+                    "postgresql://postgres:postgres@localhost:5432/mdm",
                 )
-                df = pd.read_sql("SELECT * FROM public.customer_master;", conn)
-                conn.close()
+                engine = create_engine(postgres_uri)
+                df = pd.read_sql("SELECT * FROM public.customer_master;", engine)
                 st.dataframe(df, use_container_width=True)
             except Exception as e:
-                st.error(f"PostgreSQL Query Error: {e}")
+                if "does not exist" in str(e):
+                    st.warning(
+                        "public.customer_master does not exist yet. "
+                        "Run Agent 04 with Execute Live DB enabled."
+                    )
+                else:
+                    st.error(f"PostgreSQL Query Error: {e}")
+            finally:
+                if engine is not None:
+                    engine.dispose()
         else:
             st.error("❌ Unable to connect to PostgreSQL container.")
 
