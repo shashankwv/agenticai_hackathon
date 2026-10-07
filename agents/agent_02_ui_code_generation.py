@@ -91,11 +91,14 @@ def generate_ui_code(jira_spec: str, existing_code: str = None, baseline_code: s
 {jira_spec}
 
 REQUIREMENTS:
-1. Import `re`, `json`, `streamlit as st`, `requests`.
-2. Define `API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"`.
+1. Import `re`, `json`, `streamlit as st`, `requests`, `uuid`.
+2. Define `API_INGEST_URL = "[http://127.0.0.1:8000/api/ingest](http://127.0.0.1:8000/api/ingest)"`.
 3. Define helper:
 def submit_to_pipeline(form_data: dict) -> dict:
     try:
+        # Dynamically ensure a unique ID is attached if required by API schema
+        if "id" not in form_data or form_data["id"] in [None, "", "generated_id"]:
+            form_data["id"] = str(uuid.uuid4())
         resp = requests.post(API_INGEST_URL, json=form_data, timeout=10)
         return resp.json()
     except Exception as e:
@@ -106,7 +109,7 @@ def submit_to_pipeline(form_data: dict) -> dict:
    - status 'success': `st.success(...)`
    - status 'requires_pipeline' or 'requires_human_review': `st.info(...)` or `st.warning(...)`
    - status 'error': `st.error(...)`
-6. Apply regex formatting for Aadhaar/PAN fields.
+6. Apply regex formatting for Aadhaar/PAN fields. Do NOT hardcode literal strings like 'generated_id'.
 7. Return executable Python code wrapped ONLY inside valid structured JSON schema."""
 
     # Primary Attempt: Structured LLM Output

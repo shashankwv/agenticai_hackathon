@@ -99,31 +99,40 @@ def sanitize_etl_code(code_str: str) -> str:
 
 
 def generate_etl_pipeline_fast(jira_spec: str, error_context: str = None) -> str:
-    fix_prompt = f"\nPREVIOUS SYNTAX ERROR TO FIX:\n{error_context}\nKeep the code concise. Ensure all parentheses and quotes are properly closed.\n" if error_context else ""
+    fix_prompt = f"\nPREVIOUS SYNTAX ERROR TO FIX:\n{error_context}\nKeep the code concise.\n" if error_context else ""
 
-    prompt = f"""You are an ETL Data Engineer. Build a compact Python ETL pipeline script for DuckDB based on this spec:
-Spec: {jira_spec}
+    prompt = f"""You are an Autonomous ETL Engineer. Analyze the requirements specification and generate a self-contained Python ETL pipeline script.
+
+Specification:
+{jira_spec}
 {fix_prompt}
 
-CRITICAL RULES:
-1. Output MUST be under 100 lines of code. DO NOT include detailed docstrings or comments.
-2. Import `json`, `duckdb`, `pandas as pd`, `pathlib.Path`.
+DYNAMIC DESIGN REQUIREMENTS:
+1. Output MUST be executable Python under 100 lines. No verbose docstrings.
+2. Imports: `json`, `uuid`, `re`, `duckdb`, `pandas as pd`, `pathlib.Path`.
 3. Locate DuckDB at `Path(__file__).resolve().parent / "etl.duckdb"`.
-4. Define `mask_sensitive_value(val: str, keep_last: int = 4) -> str`.
-5. Define `transform_batch(raw_records: list[dict]) -> list[dict]` to clean and mask sensitive fields.
-6. Define `run_pipeline()` to:
+4. Implement `mask_sensitive_value(val: str, keep_last: int = 4) -> str` to dynamically mask sensitive string fields.
+5. Autonomous Field Normalization & Validation:
+   - Infer identifier or sensitive payload key names dynamically based on the input payload/spec (e.g. matching fields ending in '_no', 'ssn', 'pan', 'aadhaar', 'id_number').
+   - Clean raw values by extracting digits/alphanumerics (`re.sub(r'\\D', '', val)`).
+   - If a record fails expected length or format checks for the identified domain field, reject it.
+   - For rejected records, log the exact record ID, reason key, AND provide a clear expected sample string format (e.g., `expected_sample="XXX-XX-XXXX"` or standard layout).
+6. Implement `transform_batch(raw_records: list[dict]) -> tuple[list[dict], list[dict]]`:
+   - Returns `(valid_records, rejected_records)`.
+   - Dynamically ensure unique primary key UUIDs using `uuid.uuid4()` if missing or placeholder strings are present.
+7. Implement `run_pipeline()` to:
    - Connect to `etl.duckdb`.
-   - Ensure table `landing_ui` exists: "CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR, ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);"
-   - Query `landing_ui` safely.
-   - Run `transform_batch()`.
-   - Create/insert transformed data into `staging_ui`.
-   - Print summary.
-7. Include `if __name__ == "__main__": run_pipeline()`.
-8. SYNTAX SAFETY:
+   - Ensure table `landing_ui` exists: "CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(), ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);"
+   - Query raw payload JSON from `landing_ui`.
+   - Execute `transform_batch()`.
+   - Persist valid transformed records into `staging_ui`.
+   - Output an execution summary including counts (landing, loaded, rejected) and detailed logs for any rejected items with expected sample guidance.
+8. Standard entrypoint: `if __name__ == "__main__": run_pipeline()`.
+9. SYNTAX SAFETY:
    - Use standard single-line strings for SQL queries.
    - Do NOT split strings or statements across lines without parentheses.
 
-Return ONLY valid executable Python code in ```python ``` block."""
+Return ONLY valid executable Python code in a ```python ``` code block."""
 
     llm = get_llm(temperature=0.1)
     raw_output = llm.invoke(prompt)

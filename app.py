@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import socket
@@ -12,7 +13,6 @@ import duckdb
 import pandas as pd
 import psycopg2
 import streamlit as st
-import streamlit.components.v1 as components
 
 # ============================================================================
 # CONSOLIDATED AGENT IMPORTS
@@ -399,7 +399,7 @@ st.markdown(
         color: #0F172A !important;
     }
 
-    /* File Uploader Dimension & High-Contrast Matching */
+    /* File Uploader Dimension & High-Contrast Matching (Fixed to stay within bounds) */
     div[data-testid="stFileUploader"] {
         width: 100% !important;
     }
@@ -408,21 +408,50 @@ st.markdown(
         background-color: #1E293B !important;
         border: 1px solid #38BDF8 !important;
         border-radius: 6px !important;
-        padding: 0.2rem 0.5rem !important;
+        padding: 0.1rem 0.4rem !important;
         height: 38px !important;
         min-height: 38px !important;
+        max-height: 38px !important;
         display: flex !important;
+        flex-direction: row !important;
         align-items: center !important;
-        justify-content: center !important;
+        justify-content: flex-start !important;
+        overflow: hidden !important;
     }
 
-    div[data-testid="stFileUploader"] section *,
-    div[data-testid="stFileUploader"] section span,
-    div[data-testid="stFileUploader"] section small,
-    div[data-testid="stFileUploader"] section button {
+    div[data-testid="stFileUploader"] section * {
         color: #F8FAFC !important;
         -webkit-text-fill-color: #F8FAFC !important;
-        font-size: 0.68rem !important;
+        font-size: 0.65rem !important;
+    }
+
+    div[data-testid="stFileUploader"] section button {
+        background-color: #334155 !important;
+        color: #F8FAFC !important;
+        border: 1px solid #38BDF8 !important;
+        border-radius: 4px !important;
+        height: 26px !important;
+        min-height: 26px !important;
+        padding: 0 0.5rem !important;
+        width: auto !important;
+        max-width: 110px !important;
+        flex-shrink: 0 !important;
+    }
+
+    div[data-testid="stFileUploader"] section button:hover {
+        background-color: #38BDF8 !important;
+        color: #0F172A !important;
+    }
+
+    div[data-testid="stFileUploader"] section button p {
+        color: #F8FAFC !important;
+        font-weight: 600 !important;
+        margin: 0 !important;
+        font-size: 0.65rem !important;
+    }
+
+    div[data-testid="stFileUploader"] section button:hover p {
+        color: #0F172A !important;
     }
 
     /* 7. Precision Frozen Header Panel & Mask */
@@ -650,18 +679,18 @@ def show_hitl_ticket_preview(breakdown):
     col_ok, col_not_ok = st.columns(2)
 
     with col_ok:
-        if st.button("✅ Ok", use_container_width=True, type="primary"):
+        if st.button("✅ Ok", width="stretch", type="primary"):
             st.session_state.hitl_approved = True
             st.rerun()
 
     with col_not_ok:
-        if st.button("❌ Not Ok", use_container_width=True):
+        if st.button("❌ Not Ok", width="stretch"):
             st.session_state.hitl_approved = False
             st.rerun()
 
 
 def render_terminal_component():
-    """Renders formatted console output inside an isolated HTML component with auto-scroll logic."""
+    """Renders formatted console output inside an isolated HTML component via st.iframe to avoid deprecation warnings."""
     log_rows_html = ""
     for log in st.session_state.execution_logs:
         if not log["message"]:
@@ -735,7 +764,11 @@ def render_terminal_component():
     </body>
     </html>
     """
-    components.html(html_code, height=195)
+    
+    # Convert raw HTML string into base64 Data URI to render via st.iframe without triggering deprecation warnings
+    encoded_html = base64.b64encode(html_code.encode("utf-8")).decode("utf-8")
+    data_uri = f"data:text/html;base64,{encoded_html}"
+    st.iframe(src=data_uri, height=195)
 
 
 def update_terminal_ui():
@@ -788,9 +821,9 @@ with st.sidebar:
 
     col_link1, col_link2 = st.columns(2)
     with col_link1:
-        st.link_button("Confluence", confluence_url, use_container_width=True)
+        st.link_button("Confluence", confluence_url, width="stretch")
     with col_link2:
-        st.link_button("Jira Board", jira_url, use_container_width=True)
+        st.link_button("Jira Board", jira_url, width="stretch")
 
     st.markdown(
         "<div style='margin: 0.25rem 0; border-bottom: 1px solid #334155;'></div>",
@@ -822,9 +855,9 @@ with st.sidebar:
     )
 
     run_pipeline_clicked = st.button(
-        "⚡ Run end-to-end Pipeline", type="primary", use_container_width=True
+        "⚡ Run end-to-end Pipeline", type="primary", width="stretch"
     )
-    reset_clicked = st.button("🧹 Reset State", use_container_width=True)
+    reset_clicked = st.button("🧹 Reset State", width="stretch")
 
     st.markdown("<div style='margin: 0.15rem 0;'></div>", unsafe_allow_html=True)
     human_in_loop = st.toggle(
@@ -875,7 +908,7 @@ with col_pipeline:
             """,
             unsafe_allow_html=True,
         )
-        run_phase_1 = st.button("Run Phase 1", key="btn_a1", use_container_width=True)
+        run_phase_1 = st.button("Run Phase 1", key="btn_a1", width="stretch")
         status_html = (
             '<div class="status-pill status-pill-ready">READY ✅</div>'
             if a1_done
@@ -893,7 +926,7 @@ with col_pipeline:
             """,
             unsafe_allow_html=True,
         )
-        run_phase_2 = st.button("Run Phase 2", key="btn_a2", use_container_width=True)
+        run_phase_2 = st.button("Run Phase 2", key="btn_a2", width="stretch")
         status_html = (
             '<div class="status-pill status-pill-ready">READY ✅</div>'
             if a2_done
@@ -911,7 +944,7 @@ with col_pipeline:
             """,
             unsafe_allow_html=True,
         )
-        run_phase_3 = st.button("Run Phase 3", key="btn_a3", use_container_width=True)
+        run_phase_3 = st.button("Run Phase 3", key="btn_a3", width="stretch")
         status_html = (
             '<div class="status-pill status-pill-ready">READY ✅</div>'
             if a3_done
@@ -929,7 +962,7 @@ with col_pipeline:
             """,
             unsafe_allow_html=True,
         )
-        run_phase_4 = st.button("Run Phase 4", key="btn_a4", use_container_width=True)
+        run_phase_4 = st.button("Run Phase 4", key="btn_a4", width="stretch")
         status_html = (
             '<div class="status-pill status-pill-ready">READY ✅</div>'
             if a4_done
@@ -1240,7 +1273,7 @@ with tab_a2:
         if st.button(
             "🚀 Launch UI Server (Port 8502)",
             key="btn_launch_ui_direct",
-            use_container_width=True,
+            width="stretch",
         ):
             if ensure_ui_server_running(state, max_retries=3):
                 add_log("UI Server Online.", "SUCCESS")
@@ -1252,7 +1285,7 @@ with tab_a2:
         is_live = ensure_ui_server_running(state, max_retries=1)
         if is_live:
             st.link_button(
-                "🌐 Open Active Application", app_url, use_container_width=True
+                "🌐 Open Active Application", app_url, width="stretch"
             )
         else:
             st.info("ℹ️ App Server is offline. Click 'Launch UI Server' to start.")
@@ -1266,7 +1299,7 @@ with tab_a3:
     col_etl_actions1, col_etl_actions2 = st.columns([1, 1])
 
     with col_etl_actions1:
-        if st.button("▶️ Run etl_pipeline.py Execution", use_container_width=True):
+        if st.button("▶️ Run etl_pipeline.py Execution", width="stretch"):
             etl_script = PROJECT_ROOT / "etl" / "etl_pipeline.py"
             if etl_script.exists():
                 try:
@@ -1289,7 +1322,7 @@ with tab_a3:
                 st.warning("No `etl_pipeline.py` script found. Run Phase 3 first.")
 
     with col_etl_actions2:
-        if st.button("🔄 Refresh DB View", use_container_width=True):
+        if st.button("🔄 Refresh DB View", width="stretch"):
             st.rerun()
 
     with st.expander("⚙️ Generated Staging ETL Code", expanded=False):
@@ -1328,7 +1361,7 @@ with tab_a3:
                     df_view = duck_conn.execute(
                         f'SELECT * FROM "{selected_table}" ORDER BY 1 DESC'
                     ).fetchdf()
-                    st.dataframe(df_view, use_container_width=True)
+                    st.dataframe(df_view, width="stretch")
 
                 with st.expander("🔍 SQL Query Runner", expanded=False):
                     custom_query = st.text_area(
@@ -1339,7 +1372,7 @@ with tab_a3:
                     if st.button("Execute Query", key="btn_run_duck_sql"):
                         try:
                             res_df = duck_conn.execute(custom_query).fetchdf()
-                            st.dataframe(res_df, use_container_width=True)
+                            st.dataframe(res_df, width="stretch")
                         except Exception as q_err:
                             st.error(f"SQL Error: {q_err}")
             else:
@@ -1349,8 +1382,34 @@ with tab_a3:
             st.error(f"DuckDB Error: {duck_err}")
 
 
+# ============================================================================
 # Tab 4: MDM Target DB & PostgreSQL
+# ============================================================================
 with tab_a4:
+    col_mdm_act1, col_mdm_act2 = st.columns([1, 1])
+
+    with col_mdm_act1:
+        # 1. Action button to trigger Agent 04 and pull fresh PostgreSQL data
+        if st.button("🔄 Sync Staging to MDM & Refresh View", key="btn_sync_mdm", width="stretch"):
+            add_log("Triggering MDM Sync from Staging DuckDB into PostgreSQL...", "EXEC")
+            
+            # Run Agent 04 autonomously
+            st.session_state.project_state = run_mdm_agent_autonomous(
+                st.session_state.project_state,
+                execute_live=st.session_state.get("sb_exec_live", True),
+                reset=False
+            )
+            add_log("PostgreSQL MDM Database View Refreshed.", "SUCCESS")
+            st.rerun()
+
+    with col_mdm_act2:
+        # 2. Action button to manually trigger a UI view refresh
+        if st.button("🔄 Refresh View Only", key="btn_refresh_view_only", width="stretch"):
+            st.rerun()
+
+    st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
+
+    # Generated DDL Code View
     with st.expander("🗄️ Generated PostgreSQL Master Data DDL", expanded=False):
         ddl_code = getattr(
             state,
@@ -1361,27 +1420,54 @@ with tab_a4:
 
     st.markdown("<div style='margin: 0.5rem 0;'></div>", unsafe_allow_html=True)
 
-    with st.expander("📊 PostgreSQL Master Data Table", expanded=False):
-        postgres_ready = ensure_postgres_running("mdm-postgres")
+    # PostgreSQL Master Data Table View
+    with st.expander("📊 PostgreSQL Master Data Table (`public.customer_master`)", expanded=True):
+        mdm_generated = getattr(state, "mdm_ddl", None) and bool(state.mdm_ddl.strip())
 
-        if postgres_ready:
-            try:
-                db_uri = os.getenv("POSTGRES_CONNECTION_URI", "postgresql://postgres:postgres@localhost:5432/mdm_db")
-                sample_payload = getattr(state, "sample_cleansed_output", {"id": "1", "status": "initialized"})
-                
-                # Check and dynamically trigger Agent 04 table initialization on the fly if table doesn't exist
-                ensure_table_initialized(sample_payload, db_uri=db_uri)
-
-                conn = psycopg2.connect(db_uri)
-                df = pd.read_sql("SELECT * FROM public.customer_master;", conn)
-                conn.close()
-                st.dataframe(df, use_container_width=True)
-            except Exception as e:
-                st.error(f"PostgreSQL Query Error: {e}")
+        if not mdm_generated:
+            st.warning("⚠️ **Agent 04 has not run yet.** Please execute Phase 4 to generate the MDM schema and initialize `public.customer_master`.")
         else:
-            st.error("❌ Unable to connect to PostgreSQL container.")
+            # Check container status
+            postgres_ready = ensure_postgres_running("mdm-postgres")
 
+            if not postgres_ready:
+                st.error("❌ PostgreSQL container is offline and could not be reached.")
+            else:
+                try:
+                    db_uri = os.getenv(
+                        "POSTGRES_CONNECTION_URI", 
+                        "postgresql://postgres:postgres@localhost:5432/mdm_db"
+                    )
+                    conn = psycopg2.connect(db_uri)
+                    cur = conn.cursor()
+                    
+                    # Verify table existence in information_schema
+                    cur.execute(
+                        "SELECT EXISTS (SELECT FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_name = 'customer_master');"
+                    )
+                    table_exists = cur.fetchone()[0]
+                    cur.close()
+                    conn.close()
 
+                    if not table_exists:
+                        st.info("ℹ️ Agent 04 has run, but table `public.customer_master` does not exist in PostgreSQL yet.")
+                    else:
+                        # Query records directly from PostgreSQL
+                        conn = psycopg2.connect(db_uri)
+                        df_postgres = pd.read_sql("SELECT * FROM public.customer_master;", conn)
+                        conn.close()
+
+                        if df_postgres.empty:
+                            st.info("ℹ️ Table `public.customer_master` exists in PostgreSQL, but currently contains 0 records.")
+                        else:
+                            st.success(f"Showing **{len(df_postgres)}** record(s) fetched directly from **PostgreSQL** (`mdm_db.public.customer_master`).")
+                            st.dataframe(df_postgres, width="stretch")
+
+                except Exception as db_err:
+                    st.error(f"PostgreSQL Query Error: {db_err}")
+
+                    
 # --- SESSION STATE INSPECTOR & FILE I/O ---
 st.markdown(
     "<div style='margin: 1.5rem 0 1rem 0; border-bottom: 1px solid #334155;'></div>",
@@ -1430,7 +1516,7 @@ with st.expander("🛠️ DevTools: Memory Inspector & File Checkpoints", expand
             data=current_state_json,
             file_name="state_checkpoint.json",
             mime="application/json",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.markdown(
@@ -1453,7 +1539,7 @@ with st.expander("🛠️ DevTools: Memory Inspector & File Checkpoints", expand
         col_submit, _ = st.columns([1, 3])
         with col_submit:
             submit_clicked = st.form_submit_button(
-                "💾 Save Modifications", use_container_width=True
+                "💾 Save Modifications", width="stretch"
             )
             if submit_clicked:
                 try:

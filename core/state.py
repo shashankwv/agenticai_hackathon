@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 
 class AttributeSpec(BaseModel):
@@ -14,6 +14,7 @@ class EntitySchema(BaseModel):
     attributes: List[AttributeSpec]
 
 class ProjectState(BaseModel):
+    model_config = ConfigDict(extra="allow")
     raw_confluence_doc: str = ""
     jira_ui_task: str = ""
     jira_etl_task: str = ""
