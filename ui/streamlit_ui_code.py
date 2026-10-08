@@ -4,54 +4,16 @@ import uuid
 import streamlit as st
 import requests
 
+# NOTE: Production deployments must point this at an HTTPS endpoint (SSN must only travel over TLS).
 API_INGEST_URL = "http://127.0.0.1:8000/api/ingest"
 
-# Regex patterns used purely for display formatting (non-blocking, no validation)
-UUID_PATTERN = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-AADHAAR_PATTERN = re.compile(r"^\s*(\d{4})\s*-?\s*(\d{4})\s*-?\s*(\d{4})\s*$")
-PAN_PATTERN = re.compile(r"^\s*([A-Za-z]{5})\s*([0-9]{4})\s*([A-Za-z])\s*$")
-
 MARITAL_STATUS_OPTIONS = ["Single", "Married", "Divorced", "Widowed"]
-
-
-def format_identifier_preview(value: str) -> str:
-    """Return a display-friendly version of an identifier using regex.
-    Aadhaar -> 'XXXX XXXX XXXX', PAN -> upper-case 'AAAAA9999A'. Anything else is returned untouched.
-    This is cosmetic only; the raw value is what gets submitted.
-    """
-    if not isinstance(value, str):
-        return value
-    aadhaar_match = AADHAAR_PATTERN.match(value)
-    if aadhaar_match:
-        return " ".join(aadhaar_match.groups())
-    pan_match = PAN_PATTERN.match(value)
-    if pan_match:
-        return "".join(pan_match.groups()).upper()
-    return value
-
-
-def validate_marital_status(value) -> str:
-    """Return an inline error message if Marital Status is not selected, else an empty string."""
-    if value is None or value not in MARITAL_STATUS_OPTIONS:
-        return "Marital Status is required. Please select one option."
-    return ""
-
-
-def build_payload(full_name: str, phone_number, ssn: str, marital_status: str) -> dict:
-    """Map form fields to the intake payload, binding the radio value to 'marital_status'."""
-    return {
-        "full_name": full_name,
-        "phone_number": int(phone_number),
-        "ssn": ssn,
-        "marital_status": marital_status,
-    }
 
 
 def submit_to_pipeline(form_data: dict) -> dict:
     try:
         # Dynamically ensure a unique ID is attached if required by API schema
-        current_id = form_data.get("id")
-        if not isinstance(current_id, str) or not UUID_PATTERN.match(current_id):
+        if "id" not in form_data or form_data["id"] in [None, "", "generated_id"]:
             form_data["id"] = str(uuid.uuid4())
         resp = requests.post(API_INGEST_URL, json=form_data, timeout=10)
         return resp.json()
@@ -59,55 +21,131 @@ def submit_to_pipeline(form_data: dict) -> dict:
         return {"status": "error", "message": f"Ingestion server offline (Port 8000). Please start api_bridge.py: {e}"}
 
 
-st.set_page_config(page_title="KYC Initial Intake", page_icon="\U0001FAAA")
-st.title("Customer KYC - Initial Intake")
-st.caption("Per BRD: no client-side validations are enforced on text fields. Marital Status is a mandatory selection. Raw payload is posted to the intake ingestion endpoint.")
+def format_identifier(raw_value: str) -> str:
+    """Regex-based *formatting only* (no validation / rejection, per BRD).
+    Normalises SSN, Aadhaar and PAN style identifiers into canonical shapes;
+    anything else is passed through as captured.
+    """
+    value = (raw_value or "").strip()
+    digits = re.sub(r"\D", "", value)
+    # SSN: 9 digits -> XXX-XX-XXXX
+    if re.fullmatch(r"\d{9}", digits):
+        return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
+    # Aadhaar: 12 digits -> XXXX XXXX XXXX
+    if re.fullmatch(r"\d{12}", digits):
+        return " ".join(re.findall(r"\d{4}", digits))
+    # PAN: AAAAA9999A -> uppercase, alphanumerics only
+    pan_candidate = re.sub(r"[^A-Za-z0-9]", "", value).upper()
+    if re.fullmatch(r"[A-Z]{5}\d{4}[A-Z]", pan_candidate):
+        return pan_candidate
+    return value
 
+
+def format_name(raw_value: str) -> str:
+    return re.sub(r"\s+", " ", (raw_value or "")).strip()
+
+
+def mask_identifier(value: str) -> str:
+    """Masks everything except the last 4 characters for on-screen acknowledgment."""
+    if not value:
+        return ""
+    tail = value[-4:]
+    return re.sub(r"[A-Za-z0-9]", "*", value[:-4]) + tail
+
+
+def validate_marital_status(value) -> str:
+    """Client-side required validation for the Marital Status enum.
+    Returns an empty string when valid, otherwise the inline error message.
+    """
+    if value is None or str(value).strip() == "":
+        return "Marital Status is required. Please select one option."
+    if value not in MARITAL_STATUS_OPTIONS:
+        return f"Marital Status must be one of: {', '.join(MARITAL_STATUS_OPTIONS)}."
+    return ""
+
+
+st.set_page_config(page_title="KYC Initial Intake", page_icon="\U0001F6C2", layout="centered")
+st.title("Customer KYC - Initial Intake")
+st.caption("Captured values are forwarded as-is to the ETL intake endpoint. No client-side validation is applied to identifier fields (per BRD); Marital Status is a mandatory selection.")
+
+if not API_INGEST_URL.lower().startswith("https://"):
+    st.warning("Local development endpoint in use (HTTP). Production must use an HTTPS ingest URL so the SSN is encrypted in transit.")
+
+# clear_on_submit is disabled so that captured values are retained when the
+# mandatory Marital Status validation blocks submission.
 with st.form("kyc_form", clear_on_submit=False):
-    full_name = st.text_input("Full Name")
-    phone_number = st.number_input("Phone Number", min_value=0, step=1, format="%d")
-    ssn = st.text_input("SSN")
+    full_name = st.text_input("Full Name", placeholder="e.g. Jane A. Doe")
+    phone_number = st.number_input(
+        "Phone Number",
+        min_value=0,
+        value=0,
+        step=1,
+        format="%d",
+        help="Digits only, e.g. 4155550123",
+    )
+    ssn = st.text_input(
+        "SSN",
+        type="password",
+        placeholder="e.g. 123-45-6789",
+        help="Masked on screen. Never written to logs or analytics.",
+    )
     marital_status = st.radio(
         "Marital Status *",
         options=MARITAL_STATUS_OPTIONS,
         index=None,
         horizontal=True,
         key="marital_status",
+        help="Mandatory. Select exactly one option.",
     )
-    marital_error_placeholder = st.empty()
+    marital_error_slot = st.empty()
     submitted = st.form_submit_button("Submit")
 
 if submitted:
     marital_error = validate_marital_status(marital_status)
+
     if marital_error:
-        # Block submission and show inline required-field error directly under the radio group
-        marital_error_placeholder.error(marital_error)
+        # Inline error rendered directly beneath the radio group; submission is blocked.
+        marital_error_slot.error(marital_error)
         st.stop()
 
-    form_data = build_payload(full_name, phone_number, ssn, marital_status)
+    form_data = {
+        "id": str(uuid.uuid4()),
+        "form_type": "kyc_initial_intake",
+        "full_name": format_name(full_name),
+        "phone_number": str(int(phone_number)) if phone_number else "",
+        "ssn": format_identifier(ssn),
+        "marital_status": str(marital_status),
+    }
 
-    with st.expander("Payload preview", expanded=False):
-        st.code(json.dumps(form_data, indent=2), language="json")
-        formatted_preview = format_identifier_preview(ssn)
-        if formatted_preview != ssn:
-            st.write(f"Identifier display format: `{formatted_preview}`")
-
-    with st.spinner("Submitting to intake pipeline..."):
+    with st.spinner("Submitting to ETL intake endpoint..."):
         result = submit_to_pipeline(form_data)
 
-    status = str(result.get("status", "")).lower() if isinstance(result, dict) else ""
-    message = result.get("message", "") if isinstance(result, dict) else str(result)
+    if not isinstance(result, dict):
+        result = {"status": "error", "message": "Unexpected response from ingest endpoint."}
+
+    status = str(result.get("status", "")).strip().lower()
+    message = result.get("message") or result.get("detail") or ""
+    record_id = result.get("id") or form_data["id"]
 
     if status == "success":
-        st.success(message or f"KYC intake submitted successfully. Record ID: {form_data.get('id')}")
+        st.success(f"KYC intake submitted successfully. Reference ID: {record_id}" + (f" - {message}" if message else ""))
     elif status == "requires_pipeline":
-        st.info(message or "Submission accepted and queued for downstream pipeline processing.")
+        st.info(f"Submission accepted and queued for downstream pipeline processing. Reference ID: {record_id}" + (f" - {message}" if message else ""))
     elif status == "requires_human_review":
-        st.warning(message or "Submission received and flagged for human review.")
+        st.warning(f"Submission received but flagged for human review. Reference ID: {record_id}" + (f" - {message}" if message else ""))
     elif status == "error":
-        st.error(message or "Submission failed.")
+        st.error(f"Submission failed: {message or 'Unknown error from ingest endpoint.'}")
     else:
-        st.warning(f"Unrecognized response from ingestion endpoint: {result}")
+        st.info(f"Submission returned status '{status or 'unknown'}'." + (f" {message}" if message else ""))
 
-    with st.expander("Raw API response", expanded=False):
-        st.json(result if isinstance(result, dict) else {"response": str(result)})
+    # Acknowledgment panel: SSN is masked and never emitted to logs/console/analytics.
+    acknowledgment = {
+        "reference_id": record_id,
+        "status": status or "unknown",
+        "full_name": form_data["full_name"],
+        "phone_number": form_data["phone_number"],
+        "ssn": mask_identifier(form_data["ssn"]),
+        "marital_status": form_data["marital_status"],
+    }
+    with st.expander("Submission acknowledgment"):
+        st.code(json.dumps(acknowledgment, indent=2), language="json")

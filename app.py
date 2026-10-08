@@ -12,6 +12,7 @@ import signal
 import duckdb
 import pandas as pd
 import psycopg2
+from sqlalchemy import create_engine
 import streamlit as st
 
 # ============================================================================
@@ -1030,6 +1031,7 @@ def execute_phases_2_through_4():
         st.session_state.project_state,
         execute_live=st.session_state.get("sb_exec_live", True),
         reset=start_fresh,
+        logger=add_log
     )
     elapsed_a4 = time.perf_counter() - t_start
     if (
@@ -1208,7 +1210,12 @@ if run_phase_4:
     add_log("Agent 04 Triggered: DDL Creation & DB Deployment...", "EXEC")
     add_log("[PROCESSING...] Deploying MDM Schema...", "WARN")
     start_time = time.perf_counter()
-    state = run_mdm_agent_autonomous(state, execute_live=execute_live, reset=start_fresh)
+    state = run_mdm_agent_autonomous(
+        state, 
+        execute_live=execute_live, 
+        reset=start_fresh, 
+        logger=add_log
+    )
     st.session_state.project_state = state
     elapsed = time.perf_counter() - start_time
     if (
@@ -1303,7 +1310,7 @@ with tab_a3:
             etl_script = PROJECT_ROOT / "etl" / "etl_pipeline.py"
             if etl_script.exists():
                 try:
-                    # Dynamically run the generated script
+                    add_log("Starting etl_pipeline.py execution...", "EXEC")
                     result = subprocess.run(
                         [sys.executable, str(etl_script)],
                         cwd=PROJECT_ROOT,
@@ -1311,8 +1318,17 @@ with tab_a3:
                         text=True,
                         timeout=30,
                     )
+                    
+                    # Log standard execution output line by line
+                    if result.stdout:
+                        for line in result.stdout.strip().splitlines():
+                            add_log(f"[ETL STDOUT] {line}", "INFO")
+                    if result.stderr:
+                        for line in result.stderr.strip().splitlines():
+                            add_log(f"[ETL LOG] {line}", "WARN")
+
                     add_log("Executed etl_pipeline.py successfully.", "SUCCESS")
-                    st.success("ETL Pipeline executed!")
+                    st.success("ETL Pipeline executed successfully!")
                     if result.stdout:
                         st.code(result.stdout)
                 except Exception as run_err:
@@ -1336,7 +1352,7 @@ with tab_a3:
     with st.expander("📊 DuckDB Landing & Staging Explorer", expanded=False):
         duckdb_file = PROJECT_ROOT / "etl" / "etl.duckdb"
 
-        # Auto-create table with correct schema including ingested_at on start fresh or initial load
+        # Auto-create landing table on start fresh or initial load
         if not duckdb_file.exists():
             duckdb_file.parent.mkdir(parents=True, exist_ok=True)
             conn_init = duckdb.connect(str(duckdb_file))
@@ -1381,7 +1397,6 @@ with tab_a3:
         except Exception as duck_err:
             st.error(f"DuckDB Error: {duck_err}")
 
-
 # ============================================================================
 # Tab 4: MDM Target DB & PostgreSQL
 # ============================================================================
@@ -1393,11 +1408,12 @@ with tab_a4:
         if st.button("🔄 Sync Staging to MDM & Refresh View", key="btn_sync_mdm", width="stretch"):
             add_log("Triggering MDM Sync from Staging DuckDB into PostgreSQL...", "EXEC")
             
-            # Run Agent 04 autonomously
+            # Run Agent 04 autonomously with logger passed in
             st.session_state.project_state = run_mdm_agent_autonomous(
                 st.session_state.project_state,
                 execute_live=st.session_state.get("sb_exec_live", True),
-                reset=False
+                reset=False,
+                logger=add_log
             )
             add_log("PostgreSQL MDM Database View Refreshed.", "SUCCESS")
             st.rerun()
@@ -1428,7 +1444,7 @@ with tab_a4:
             st.warning("⚠️ **Agent 04 has not run yet.** Please execute Phase 4 to generate the MDM schema and initialize `public.customer_master`.")
         else:
             # Check container status
-            postgres_ready = ensure_postgres_running("mdm-postgres")
+            postgres_ready = ensure_postgres_running("mdm-postgres", logger=add_log)
 
             if not postgres_ready:
                 st.error("❌ PostgreSQL container is offline and could not be reached.")
@@ -1453,10 +1469,9 @@ with tab_a4:
                     if not table_exists:
                         st.info("ℹ️ Agent 04 has run, but table `public.customer_master` does not exist in PostgreSQL yet.")
                     else:
-                        # Query records directly from PostgreSQL
-                        conn = psycopg2.connect(db_uri)
-                        df_postgres = pd.read_sql("SELECT * FROM public.customer_master;", conn)
-                        conn.close()
+                        # Use SQLAlchemy engine to avoid pandas UserWarning with DBAPI2 objects
+                        engine = create_engine(db_uri)
+                        df_postgres = pd.read_sql("SELECT * FROM public.customer_master;", engine)
 
                         if df_postgres.empty:
                             st.info("ℹ️ Table `public.customer_master` exists in PostgreSQL, but currently contains 0 records.")

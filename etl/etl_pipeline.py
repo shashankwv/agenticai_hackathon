@@ -1,107 +1,134 @@
-import json, uuid, re, duckdb
+import json, uuid, re, duckdb, logging, sys
 import pandas as pd
 from pathlib import Path
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", stream=sys.stdout)
+log = logging.getLogger("etl_intake")
 DB_PATH = Path(__file__).resolve().parent / "etl.duckdb"
-ALLOWED_MARITAL = {"Single", "Married", "Divorced", "Widowed"}
-PLACEHOLDERS = {"", "null", "none", "n/a", "na", "tbd", "todo", "placeholder", "uuid", "<id>", "0"}
-SENSITIVE_KEY_RE = re.compile(r"(_no|ssn|pan|aadhaar|id_number)$", re.IGNORECASE)
-DOMAIN_RULES = {
-    "ssn": (r"\d{9}", "XXX-XX-XXXX", False),
-    "aadhaar": (r"\d{12}", "XXXX XXXX XXXX", False),
-    "pan": (r"[A-Z]{5}\d{4}[A-Z]", "AAAAA9999A", True),
-    "id_number": (r"[A-Z0-9]{6,20}", "A1B2C3D4E5", True),
-    "_no": (r"\d{6,20}", "123456789", False),
-}
-UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+SENSITIVE_PATTERN = re.compile(r"ssn|tax_id|secret|password|token", re.I)
+MARITAL_ALLOWED = {"single", "married", "divorced", "widowed"}
+MARITAL_REASON = "EXPECTED_ONE_OF_Single|Married|Divorced|Widowed"
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+# (field-name regex, validator, reason code) - applied dynamically to any payload key matching the pattern
+FIELD_RULES = [
+    (r"^_malformed", lambda v: False, "INVALID_JSON_PAYLOAD_EXPECTED_OBJECT"),
+    (r"marital", lambda v: v.lower() in MARITAL_ALLOWED, "INVALID_MARITAL_STATUS_" + MARITAL_REASON),
+    (r"ssn|tax_id", lambda v: "*" in v or re.fullmatch(r"\d{9}", v) is not None, "INVALID_SSN_EXPECTED_9_DIGITS_OR_MASKED_FORMAT"),
+    (r"phone", lambda v: re.fullmatch(r"\d{10,15}", v) is not None, "INVALID_PHONE_EXPECTED_10_TO_15_DIGITS"),
+    (r"email", lambda v: re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", v) is not None, "INVALID_EMAIL_EXPECTED_USER@DOMAIN.TLD"),
+    (r"name", lambda v: len(v) > 0, "INVALID_NAME_EXPECTED_NON_EMPTY_STRING"),
+]
+NOT_NULL_PATTERN = re.compile(r"marital", re.I)  # present-but-null values for these keys are quarantined
 
 
 def mask_sensitive_value(val: str, keep_last: int = 4) -> str:
-    s = "" if val is None else str(val)
-    if len(s) <= keep_last:
-        return "*" * len(s)
-    return "*" * (len(s) - keep_last) + s[-keep_last:]
+    if val is None:
+        return None
+    s = str(val)
+    if "*" in s:
+        return s
+    tail = s[-keep_last:] if keep_last > 0 else ""
+    return "*" * max(len(s) - len(tail), 0) + tail
 
 
-def _domain_for(key: str) -> str:
+def normalize_value(key: str, val):
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    if isinstance(val, (dict, list)):
+        return json.dumps(val)
+    s = str(val).strip()
+    if not s or s.lower() in ("null", "none", "nan"):
+        return None
     k = key.lower()
-    for dom in ("ssn", "aadhaar", "pan", "id_number"):
-        if k.endswith(dom):
-            return dom
-    return "_no"
-
-
-def _clean_identifier(val, alnum: bool) -> str:
-    s = "" if val is None else str(val).upper()
-    return re.sub(r"[^A-Z0-9]", "", s) if alnum else re.sub(r"\D", "", s)
-
-
-def _is_placeholder(val) -> bool:
-    return val is None or str(val).strip().lower() in PLACEHOLDERS
-
-
-def _reject(rec_id, key, reason_key, sample, masked=None):
-    return {"record_id": rec_id, "field": key, "reason_key": reason_key, "value_masked": masked, "expected_sample": sample}
+    if re.search(r"phone|ssn|tax_id", k) and "*" not in s:
+        s = re.sub(r"\D", "", s)
+    elif "email" in k:
+        s = s.lower()
+    elif "marital" in k:
+        s = s.title()
+    return s
 
 
 def transform_batch(raw_records: list[dict]) -> tuple[list[dict], list[dict]]:
-    valid, rejected = [], []
-    for raw in raw_records:
-        rec = dict(raw or {})
-        rec_id = rec.get("id") or rec.get("customer_id")
-        if _is_placeholder(rec_id) or not UUID_RE.fullmatch(str(rec_id).strip()):
-            rec_id = str(uuid.uuid4())
-        rec["id"] = rec_id
-        reason = None
-        for key in [k for k in rec if SENSITIVE_KEY_RE.search(k)]:
-            pattern, sample, alnum = DOMAIN_RULES[_domain_for(key)]
-            cleaned = _clean_identifier(rec[key], alnum)
-            if not re.fullmatch(pattern, cleaned):
-                reason = _reject(rec_id, key, f"invalid_{key.lower()}_format", sample, mask_sensitive_value(cleaned))
-                break
-            rec[key] = cleaned
-        if reason is None:
-            ms = rec.get("marital_status")
-            historical = str(rec.get("source", "")).lower() == "historical"
-            if ms is None or (isinstance(ms, float) and pd.isna(ms)) or str(ms).strip() == "":
-                rec["marital_status"] = None
-                if not historical:
-                    reason = _reject(rec_id, "marital_status", "marital_status_null", "Single|Married|Divorced|Widowed")
-            else:
-                norm = str(ms).strip().capitalize()
-                if norm in ALLOWED_MARITAL:
-                    rec["marital_status"] = norm
-                else:
-                    reason = _reject(rec_id, "marital_status", "marital_status_unknown", "Single|Married|Divorced|Widowed", str(ms))
-        (rejected if reason else valid).append(reason or rec)
+    valid, rejected, seen_ids = [], [], set()
+    for idx, raw in enumerate(raw_records):
+        rec, errors = {}, []
+        for key, val in (raw or {}).items():
+            k = str(key).strip()
+            if not k:
+                continue
+            v = normalize_value(k, val)
+            if v is None:
+                if NOT_NULL_PATTERN.search(k):
+                    errors.append(f"{k}:NULL_MARITAL_STATUS_{MARITAL_REASON}")
+                rec[k] = None
+                continue
+            for pattern, check, reason in FIELD_RULES:
+                if re.search(pattern, k, re.I):
+                    if not check(v):
+                        errors.append(f"{k}:{reason}")
+                    break
+            rec[k] = mask_sensitive_value(v) if SENSITIVE_PATTERN.search(k) else v
+        rid = rec.get("id")
+        if not rid or not UUID_RE.match(str(rid)) or rid in seen_ids:
+            rec["id"] = str(uuid.uuid4())
+            log.info("Record #%d: missing/invalid/duplicate id %r -> assigned %s", idx, rid, rec["id"])
+        seen_ids.add(rec["id"])
+        if errors:
+            log.warning("Record %s quarantined: %s", rec["id"], "; ".join(errors))
+            rejected.append({"id": rec["id"], "reasons": errors, "record": rec})
+        else:
+            valid.append(rec)
+    log.info("transform_batch: %d valid, %d rejected", len(valid), len(rejected))
     return valid, rejected
 
 
 def run_pipeline():
+    log.info("Connecting to DuckDB at %s", DB_PATH)
     con = duckdb.connect(str(DB_PATH))
     con.execute("CREATE TABLE IF NOT EXISTS landing_ui (id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(), ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, payload JSON);")
-    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR PRIMARY KEY, marital_status VARCHAR, payload JSON, loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
-    rows = con.execute("SELECT id, CAST(payload AS VARCHAR) FROM landing_ui").fetchall()
+    con.execute("CREATE TABLE IF NOT EXISTS staging_ui (id VARCHAR PRIMARY KEY, staged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
+    con.execute("CREATE TABLE IF NOT EXISTS error_ui (id VARCHAR, reason VARCHAR, payload JSON, logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);")
+    df = con.execute("SELECT id, payload FROM landing_ui").df()
+    log.info("Read %d landing rows", len(df))
     raw_records = []
-    for landing_id, payload in rows:
+    for lid, payload in zip(df["id"], df["payload"]):
         try:
-            body = json.loads(payload) if payload else {}
-        except (TypeError, ValueError):
-            body = {}
-        body = body if isinstance(body, dict) else {"payload": body}
-        body.setdefault("id", landing_id)
-        raw_records.append(body)
-    valid, rejected = transform_batch(raw_records)
-    if valid:
-        df = pd.DataFrame({"id": [r["id"] for r in valid], "marital_status": [r.get("marital_status") for r in valid], "payload": [json.dumps(r, default=str) for r in valid]})
-        con.register("df_valid", df)
-        con.execute("INSERT OR REPLACE INTO staging_ui SELECT id, marital_status, CAST(payload AS JSON), CURRENT_TIMESTAMP FROM df_valid")
+            p = json.loads(payload) if isinstance(payload, str) else (payload or {})
+            if not isinstance(p, dict):
+                raise ValueError("payload is not a JSON object")
+        except (ValueError, TypeError) as exc:
+            log.error("Landing %s: malformed payload (%s)", lid, exc)
+            p = {"_malformed_payload": str(payload)}
+        p.setdefault("id", lid)
+        raw_records.append(p)
+    valid_records, rejected_records = transform_batch(raw_records)
+    all_keys = sorted(list(set(k for r in valid_records for k in r.keys() if k not in ("id", "staged_at"))))
+    existing = {row[1] for row in con.execute("PRAGMA table_info('staging_ui')").fetchall()}
+    for key in all_keys:
+        if key not in existing:
+            log.info("Schema evolution: ALTER TABLE staging_ui ADD COLUMN \"%s\" VARCHAR (existing rows backfilled NULL)", key)
+            con.execute('ALTER TABLE staging_ui ADD COLUMN "' + key + '" VARCHAR')
+    if valid_records:
+        cols = ["id"] + all_keys
+        quoted_cols = ['"' + c + '"' for c in cols]
+        placeholders = ["?"] * len(cols)
+        update_set = ['"' + k + '"=EXCLUDED."' + k + '"' for k in all_keys]
+        if update_set:
+            sql = "INSERT INTO staging_ui (" + ", ".join(quoted_cols) + ") VALUES (" + ", ".join(placeholders) + ") ON CONFLICT (id) DO UPDATE SET " + ", ".join(update_set)
+        else:
+            sql = "INSERT INTO staging_ui (id) VALUES (?) ON CONFLICT (id) DO NOTHING"
+        params = [[r.get("id")] + [r.get(k) for k in all_keys] for r in valid_records]
+        con.executemany(sql, params)
+        log.info("Upserted %d rows into staging_ui across %d dynamic columns", len(params), len(all_keys))
+    if rejected_records:
+        con.executemany("INSERT INTO error_ui (id, reason, payload) VALUES (?, ?, ?)",
+                        [[r["id"], "; ".join(r["reasons"]), json.dumps(r["record"], default=str)] for r in rejected_records])
+        log.info("Logged %d rejected records to error_ui", len(rejected_records))
     con.close()
-    summary = {"landing": len(rows), "loaded": len(valid), "rejected": len(rejected)}
-    print("EXECUTION SUMMARY:", json.dumps(summary))
-    for r in rejected:
-        print(f"REJECTED record_id={r['record_id']} field={r['field']} reason_key={r['reason_key']} value={r['value_masked']} expected_sample=\"{r['expected_sample']}\"")
-    return summary
+    summary = {"landing": len(raw_records), "loaded": len(valid_records), "rejected": len(rejected_records), "rejected_records": rejected_records}
+    print(json.dumps(summary, indent=2, default=str))
 
 
 if __name__ == "__main__":
